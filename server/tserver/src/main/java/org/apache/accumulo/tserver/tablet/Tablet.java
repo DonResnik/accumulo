@@ -54,7 +54,6 @@ import org.apache.accumulo.core.clientImpl.DurabilityImpl;
 import org.apache.accumulo.core.clientImpl.Tables;
 import org.apache.accumulo.core.conf.AccumuloConfiguration;
 import org.apache.accumulo.core.conf.ConfigurationCopy;
-import org.apache.accumulo.core.conf.ConfigurationObserver;
 import org.apache.accumulo.core.conf.Property;
 import org.apache.accumulo.core.constraints.Violations;
 import org.apache.accumulo.core.data.ByteSequence;
@@ -253,7 +252,7 @@ public class Tablet {
   private final Rate scannedRate = new Rate(0.95);
   private final AtomicLong scannedCount = new AtomicLong(0);
 
-  private final ConfigurationObserver configObserver;
+  // private final ConfigurationObserver configObserver;
 
   private final Cache<Long,List<FileRef>> bulkImported = CacheBuilder.newBuilder().build();
 
@@ -298,6 +297,30 @@ public class Tablet {
     }
   }
 
+  // /**
+  // * Only visible for testing
+  // */
+  // @VisibleForTesting
+  // protected Tablet(TabletTime tabletTime, String tabletDirectory, int logId, Path location,
+  // DatafileManager datafileManager, TabletServer tabletServer,
+  // TabletResourceManager tabletResources, TabletMemory tabletMemory,
+  // TableConfiguration tableConfiguration, KeyExtent extent,
+  // ConfigurationObserver configObserver) {
+  // this.tabletTime = tabletTime;
+  // this.tabletDirectory = tabletDirectory;
+  // this.logId = logId;
+  // this.location = location;
+  // this.datafileManager = datafileManager;
+  // this.tabletServer = tabletServer;
+  // this.context = tabletServer.getContext();
+  // this.tabletResources = tabletResources;
+  // this.tabletMemory = tabletMemory;
+  // this.tableConfiguration = tableConfiguration;
+  // this.extent = extent;
+  // this.configObserver = configObserver;
+  // this.splitCreationTime = 0;
+  // }
+  //
   /**
    * Only visible for testing
    */
@@ -305,8 +328,7 @@ public class Tablet {
   protected Tablet(TabletTime tabletTime, String tabletDirectory, int logId, Path location,
       DatafileManager datafileManager, TabletServer tabletServer,
       TabletResourceManager tabletResources, TabletMemory tabletMemory,
-      TableConfiguration tableConfiguration, KeyExtent extent,
-      ConfigurationObserver configObserver) {
+      TableConfiguration tableConfiguration, KeyExtent extent) {
     this.tabletTime = tabletTime;
     this.tabletDirectory = tabletDirectory;
     this.logId = logId;
@@ -318,7 +340,7 @@ public class Tablet {
     this.tabletMemory = tabletMemory;
     this.tableConfiguration = tableConfiguration;
     this.extent = extent;
-    this.configObserver = configObserver;
+    // this.configObserver = configObserver;
     this.splitCreationTime = 0;
   }
 
@@ -373,51 +395,51 @@ public class Tablet {
     final List<LogEntry> logEntries = tabletPaths.logEntries;
     final SortedMap<FileRef,DataFileValue> datafiles = tabletPaths.datafiles;
 
-    tableConfiguration.addObserver(configObserver = new ConfigurationObserver() {
+    // tableConfiguration.addObserver(configObserver = new ConfigurationObserver() {
+    //
+    // private void reloadConstraints() {
+    // log.debug("Reloading constraints for extent: " + extent);
+    // constraintChecker.set(new ConstraintChecker(tableConfiguration));
+    // }
+    //
+    // @Override
+    // public void propertiesChanged() {
+    // reloadConstraints();
+    //
+    // try {
+    // setupDefaultSecurityLabels(extent);
+    // } catch (Exception e) {
+    // log.error("Failed to reload default security labels for extent: {}", extent);
+    // }
+    // }
+    //
+    // @Override
+    // public void propertyChanged(String prop) {
+    // if (prop.startsWith(Property.TABLE_CONSTRAINT_PREFIX.getKey()))
+    // reloadConstraints();
+    // else if (prop.equals(Property.TABLE_DEFAULT_SCANTIME_VISIBILITY.getKey())) {
+    // try {
+    // log.info("Default security labels changed for extent: {}", extent);
+    // setupDefaultSecurityLabels(extent);
+    // } catch (Exception e) {
+    // log.error("Failed to reload default security labels for extent: {}", extent);
+    // }
+    // }
+    //
+    // }
+    //
+    // @Override
+    // public void sessionExpired() {
+    // log.debug("Session expired, no longer updating per table props...");
+    // }
+    //
+    // });
 
-      private void reloadConstraints() {
-        log.debug("Reloading constraints for extent: " + extent);
-        constraintChecker.set(new ConstraintChecker(tableConfiguration));
-      }
-
-      @Override
-      public void propertiesChanged() {
-        reloadConstraints();
-
-        try {
-          setupDefaultSecurityLabels(extent);
-        } catch (Exception e) {
-          log.error("Failed to reload default security labels for extent: {}", extent);
-        }
-      }
-
-      @Override
-      public void propertyChanged(String prop) {
-        if (prop.startsWith(Property.TABLE_CONSTRAINT_PREFIX.getKey()))
-          reloadConstraints();
-        else if (prop.equals(Property.TABLE_DEFAULT_SCANTIME_VISIBILITY.getKey())) {
-          try {
-            log.info("Default security labels changed for extent: {}", extent);
-            setupDefaultSecurityLabels(extent);
-          } catch (Exception e) {
-            log.error("Failed to reload default security labels for extent: {}", extent);
-          }
-        }
-
-      }
-
-      @Override
-      public void sessionExpired() {
-        log.debug("Session expired, no longer updating per table props...");
-      }
-
-    });
-
-    tableConfiguration.getNamespaceConfiguration().addObserver(configObserver);
+    // tableConfiguration.getNamespaceConfiguration().addObserver(configObserver);
     tabletMemory = new TabletMemory(this);
 
     // Force a load of any per-table properties
-    configObserver.propertiesChanged();
+    // configObserver.propertiesChanged();
     if (!logEntries.isEmpty()) {
       log.info("Starting Write-Ahead Log recovery for {}", this.extent);
       final AtomicLong entriesUsedOnTablet = new AtomicLong(0);
@@ -1459,8 +1481,8 @@ public class Tablet {
 
     log.debug("TABLET_HIST {} closed", extent);
 
-    tableConfiguration.getNamespaceConfiguration().removeObserver(configObserver);
-    tableConfiguration.removeObserver(configObserver);
+    // tableConfiguration.getNamespaceConfiguration().removeObserver(configObserver);
+    // tableConfiguration.removeObserver(configObserver);
 
     if (completeClose)
       closeState = CloseState.COMPLETE;

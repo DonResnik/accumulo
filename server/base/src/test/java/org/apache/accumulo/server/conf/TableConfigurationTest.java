@@ -24,9 +24,7 @@ import static org.easymock.EasyMock.expect;
 import static org.easymock.EasyMock.replay;
 import static org.easymock.EasyMock.verify;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -34,7 +32,6 @@ import java.util.UUID;
 import java.util.function.Predicate;
 
 import org.apache.accumulo.core.Constants;
-import org.apache.accumulo.core.conf.ConfigurationObserver;
 import org.apache.accumulo.core.conf.Property;
 import org.apache.accumulo.core.data.TableId;
 import org.apache.accumulo.fate.zookeeper.ZooCache;
@@ -131,17 +128,17 @@ public class TableConfigurationTest {
     assertEquals("dong", props.get("ding"));
   }
 
-  @Test
-  public void testObserver() {
-    ConfigurationObserver o = createMock(ConfigurationObserver.class);
-    c.addObserver(o);
-    Collection<ConfigurationObserver> os = c.getObservers();
-    assertEquals(1, os.size());
-    assertTrue(os.contains(o));
-    c.removeObserver(o);
-    os = c.getObservers();
-    assertEquals(0, os.size());
-  }
+  // @Test
+  // public void testObserver() {
+  // ConfigurationObserver o = createMock(ConfigurationObserver.class);
+  // c.addObserver(o);
+  // Collection<ConfigurationObserver> os = c.getObservers();
+  // assertEquals(1, os.size());
+  // assertTrue(os.contains(o));
+  // c.removeObserver(o);
+  // os = c.getObservers();
+  // assertEquals(0, os.size());
+  // }
 
   @Test
   public void testInvalidateCache() {

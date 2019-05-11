@@ -34,7 +34,7 @@ import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 import org.apache.accumulo.core.client.admin.TableOperations;
-import org.apache.accumulo.core.conf.ConfigurationObserver;
+// import org.apache.accumulo.core.conf.ConfigurationObserver;
 import org.apache.accumulo.core.conf.ConfigurationTypeHelper;
 import org.apache.accumulo.core.conf.Property;
 import org.apache.accumulo.core.data.TableId;
@@ -81,7 +81,8 @@ import com.google.common.collect.Multimap;
  * <b>table.custom.balancer.host.regex.max.outstanding.migrations</b>
  *
  */
-public class HostRegexTableLoadBalancer extends TableLoadBalancer implements ConfigurationObserver {
+public class HostRegexTableLoadBalancer extends TableLoadBalancer {// implements
+                                                                   // ConfigurationObserver {
 
   private static final String PROP_PREFIX = Property.TABLE_ARBITRARY_PROP_PREFIX.getKey();
 
@@ -226,7 +227,7 @@ public class HostRegexTableLoadBalancer extends TableLoadBalancer implements Con
     for (Entry<String,String> table : t.tableIdMap().entrySet()) {
       TableId tableId = TableId.of(table.getValue());
       tableIdToTableName.put(tableId, table.getKey());
-      conf.getTableConfiguration(tableId).addObserver(this);
+      // conf.getTableConfiguration(tableId).addObserver(this);
       Map<String,String> customProps = conf.getTableConfiguration(tableId)
           .getAllPropertiesWithPrefix(Property.TABLE_ARBITRARY_PROP_PREFIX);
       if (customProps != null && customProps.size() > 0) {
@@ -528,17 +529,17 @@ public class HostRegexTableLoadBalancer extends TableLoadBalancer implements Con
     return newInfo;
   }
 
-  @Override
-  public void propertyChanged(String key) {
-    parseConfiguration(context.getServerConfFactory());
-  }
-
-  @Override
-  public void propertiesChanged() {
-    parseConfiguration(context.getServerConfFactory());
-  }
-
-  @Override
-  public void sessionExpired() {}
-
+  // @Override
+  // public void propertyChanged(String key) {
+  // parseConfiguration(context.getServerConfFactory());
+  // }
+  //
+  // @Override
+  // public void propertiesChanged() {
+  // parseConfiguration(context.getServerConfFactory());
+  // }
+  //
+  // @Override
+  // public void sessionExpired() {}
+  //
 }

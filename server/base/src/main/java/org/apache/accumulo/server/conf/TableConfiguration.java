@@ -28,9 +28,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
 import org.apache.accumulo.core.Constants;
-import org.apache.accumulo.core.conf.ConfigurationObserver;
+import org.apache.accumulo.core.conf.AccumuloConfiguration;
 import org.apache.accumulo.core.conf.IterConfigUtil;
-import org.apache.accumulo.core.conf.ObservableConfiguration;
 import org.apache.accumulo.core.conf.Property;
 import org.apache.accumulo.core.data.TableId;
 import org.apache.accumulo.core.dataImpl.thrift.IterInfo;
@@ -49,7 +48,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMap.Builder;
 
-public class TableConfiguration extends ObservableConfiguration {
+public class TableConfiguration extends AccumuloConfiguration {
   private static final Logger log = LoggerFactory.getLogger(TableConfiguration.class);
 
   private static final Map<PropCacheKey,ZooCache> propCaches = new java.util.HashMap<>();
@@ -94,26 +93,26 @@ public class TableConfiguration extends ObservableConfiguration {
     return propCacheAccessor;
   }
 
-  @Override
-  public void addObserver(ConfigurationObserver co) {
-    if (tableId == null) {
-      String err = "Attempt to add observer for non-table configuration";
-      log.error(err);
-      throw new RuntimeException(err);
-    }
-    iterator();
-    super.addObserver(co);
-  }
-
-  @Override
-  public void removeObserver(ConfigurationObserver co) {
-    if (tableId == null) {
-      String err = "Attempt to remove observer for non-table configuration";
-      log.error(err);
-      throw new RuntimeException(err);
-    }
-    super.removeObserver(co);
-  }
+  // @Override
+  // public void addObserver(ConfigurationObserver co) {
+  // if (tableId == null) {
+  // String err = "Attempt to add observer for non-table configuration";
+  // log.error(err);
+  // throw new RuntimeException(err);
+  // }
+  // iterator();
+  // super.addObserver(co);
+  // }
+  //
+  // @Override
+  // public void removeObserver(ConfigurationObserver co) {
+  // if (tableId == null) {
+  // String err = "Attempt to remove observer for non-table configuration";
+  // log.error(err);
+  // throw new RuntimeException(err);
+  // }
+  // super.removeObserver(co);
+  // }
 
   private String getPath() {
     return context.getZooKeeperRoot() + Constants.ZTABLES + "/" + tableId + Constants.ZTABLE_CONF;

@@ -94,7 +94,7 @@ class NamespaceConfWatcher implements Watcher {
       case None:
         switch (event.getState()) {
           case Expired:
-            ServerConfigurationFactory.expireAllTableObservers();
+            // ServerConfigurationFactory.expireAllTableObservers();
             break;
           case SyncConnected:
             break;

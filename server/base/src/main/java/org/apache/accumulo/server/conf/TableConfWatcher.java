@@ -79,10 +79,10 @@ class TableConfWatcher implements Watcher {
         if (log.isTraceEnabled())
           log.trace("EventNodeDataChanged " + event.getPath());
         if (key != null)
-          scf.getTableConfiguration(tableId).propertyChanged(key);
+          scf.getTableConfiguration(tableId).getUpdateCount();
         break;
       case NodeChildrenChanged:
-        scf.getTableConfiguration(tableId).propertiesChanged();
+        scf.getTableConfiguration(tableId).getUpdateCount();
         break;
       case NodeDeleted:
         if (key == null) {
@@ -96,7 +96,7 @@ class TableConfWatcher implements Watcher {
       case None:
         switch (event.getState()) {
           case Expired:
-            ServerConfigurationFactory.expireAllTableObservers();
+            // ServerConfigurationFactory.expireAllTableObservers();
             break;
           case SyncConnected:
             break;

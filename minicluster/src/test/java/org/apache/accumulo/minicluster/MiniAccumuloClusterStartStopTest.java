@@ -21,6 +21,9 @@ import static org.junit.Assert.assertTrue;
 import java.io.File;
 import java.io.IOException;
 
+import org.apache.accumulo.core.client.AccumuloClient;
+import org.apache.accumulo.core.client.admin.TableOperations;
+import org.apache.accumulo.core.client.security.tokens.PasswordToken;
 import org.apache.commons.io.FileUtils;
 import org.junit.After;
 import org.junit.Before;
@@ -79,10 +82,16 @@ public class MiniAccumuloClusterStartStopTest {
   public void multipleStopsIsAllowed() throws Exception {
     accumulo.start();
 
-    org.apache.accumulo.core.client.Connector conn = accumulo.getConnector("root", "superSecret");
-    conn.tableOperations().create("foo");
-
+//    org.apache.accumulo.core.client.AccumuloClient conn = accumulo.getConnector("root", "superSecret");
+    AccumuloClient client = accumulo.createAccumuloClient("root", new PasswordToken("superSecret"));
+    System.out.println("client.tableOperations()");
+    TableOperations tableops = client.tableOperations();
+    System.out.println("tableops.create(");
+    tableops.create("foo");
+//    conn.tableOperations().create("foo");
+System.out.println("first stop");
     accumulo.stop();
+    System.out.println("second stop");
     accumulo.stop();
   }
 }

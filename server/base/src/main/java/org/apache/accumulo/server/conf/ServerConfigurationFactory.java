@@ -77,15 +77,15 @@ public class ServerConfigurationFactory extends ServerConfiguration {
     }
   }
 
-  static void expireAllTableObservers() {
-    synchronized (tableConfigs) {
-      for (Map<TableId,TableConfiguration> instanceMap : tableConfigs.values()) {
-        for (TableConfiguration c : instanceMap.values()) {
-          c.expireAllObservers();
-        }
-      }
-    }
-  }
+  // static void expireAllTableObservers() {
+  // synchronized (tableConfigs) {
+  // for (Map<TableId,TableConfiguration> instanceMap : tableConfigs.values()) {
+  // for (TableConfiguration c : instanceMap.values()) {
+  // c.expireAllObservers();
+  // }
+  // }
+  // }
+  // }
 
   private final ServerContext context;
   private final SiteConfiguration siteConfig;
