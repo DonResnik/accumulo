@@ -80,7 +80,7 @@ import org.apache.accumulo.core.util.NamingThreadFactory;
 import org.apache.accumulo.fate.util.LoggingRunnable;
 import org.apache.accumulo.fate.zookeeper.ZooLock;
 import org.apache.accumulo.fate.zookeeper.ZooUtil.LockID;
-import org.apache.commons.collections.map.LRUMap;
+import org.apache.commons.collections4.map.LRUMap;
 import org.apache.commons.lang.mutable.MutableLong;
 import org.apache.hadoop.io.Text;
 import org.apache.htrace.Trace;
@@ -93,8 +93,8 @@ import org.slf4j.LoggerFactory;
 
 class ConditionalWriterImpl implements ConditionalWriter {
 
-  private static ThreadPoolExecutor cleanupThreadPool = new ThreadPoolExecutor(1, 1, 3,
-      TimeUnit.SECONDS, new LinkedBlockingQueue<>(), r -> {
+  private static ThreadPoolExecutor cleanupThreadPool =
+      new ThreadPoolExecutor(1, 1, 3, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), r -> {
         Thread t = new Thread(r, "Conditional Writer Cleanup Thread");
         t.setDaemon(true);
         return t;
@@ -110,8 +110,7 @@ class ConditionalWriterImpl implements ConditionalWriter {
 
   private Authorizations auths;
   private VisibilityEvaluator ve;
-  @SuppressWarnings("unchecked")
-  private Map<Text,Boolean> cache = Collections.synchronizedMap(new LRUMap(1000));
+  private Map<Text,Boolean> cache = Collections.synchronizedMap(new LRUMap<>(1000));
   private final ClientContext context;
   private TabletLocator locator;
   private final TableId tableId;
@@ -615,9 +614,9 @@ class ConditionalWriterImpl implements ConditionalWriter {
       queueRetry(ignored, location);
 
     } catch (ThriftSecurityException tse) {
-      AccumuloSecurityException ase = new AccumuloSecurityException(
-          context.getCredentials().getPrincipal(), tse.getCode(),
-          Tables.getPrintableTableInfoFromId(context, tableId), tse);
+      AccumuloSecurityException ase =
+          new AccumuloSecurityException(context.getCredentials().getPrincipal(), tse.getCode(),
+              Tables.getPrintableTableInfoFromId(context, tableId), tse);
       queueException(location, cmidToCm, ase);
     } catch (TTransportException e) {
       locator.invalidateCache(context, location.toString());
@@ -763,13 +762,13 @@ class ConditionalWriterImpl implements ConditionalWriter {
     }
   }
 
-  private static final Comparator<Long> TIMESTAMP_COMPARATOR = Comparator
-      .nullsFirst(Comparator.reverseOrder());
+  private static final Comparator<Long> TIMESTAMP_COMPARATOR =
+      Comparator.nullsFirst(Comparator.reverseOrder());
 
-  static final Comparator<Condition> CONDITION_COMPARATOR = Comparator
-      .comparing(Condition::getFamily).thenComparing(Condition::getQualifier)
-      .thenComparing(Condition::getVisibility)
-      .thenComparing(Condition::getTimestamp, TIMESTAMP_COMPARATOR);
+  static final Comparator<Condition> CONDITION_COMPARATOR =
+      Comparator.comparing(Condition::getFamily).thenComparing(Condition::getQualifier)
+          .thenComparing(Condition::getVisibility)
+          .thenComparing(Condition::getTimestamp, TIMESTAMP_COMPARATOR);
 
   private List<TCondition> convertConditions(ConditionalMutation cm,
       CompressedIterators compressedIters) {

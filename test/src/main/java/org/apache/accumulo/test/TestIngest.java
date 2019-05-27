@@ -36,7 +36,6 @@ import org.apache.accumulo.core.client.TableExistsException;
 import org.apache.accumulo.core.client.TableNotFoundException;
 import org.apache.accumulo.core.client.security.SecurityErrorCode;
 import org.apache.accumulo.core.clientImpl.ClientContext;
-import org.apache.accumulo.core.clientImpl.TabletServerBatchWriter;
 import org.apache.accumulo.core.conf.ClientProperty;
 import org.apache.accumulo.core.conf.DefaultConfiguration;
 import org.apache.accumulo.core.crypto.CryptoServiceFactory;
@@ -53,8 +52,6 @@ import org.apache.accumulo.core.security.ColumnVisibility;
 import org.apache.accumulo.core.util.FastFormat;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.io.Text;
-import org.apache.log4j.Level;
-import org.apache.log4j.Logger;
 
 import com.beust.jcommander.Parameter;
 
@@ -142,8 +139,7 @@ public class TestIngest {
         description = "place columns in this column family", converter = VisibilityConverter.class)
     ColumnVisibility columnVisibility = new ColumnVisibility();
 
-    public IngestParams getIngestPrams() {
-      IngestParams params = new IngestParams(getClientProps(), tableName);
+    protected void populateIngestPrams(IngestParams params) {
       params.createTable = createTable;
       params.numsplits = numsplits;
       params.startRow = startRow;
@@ -157,6 +153,11 @@ public class TestIngest {
       params.stride = stride;
       params.columnFamily = columnFamily;
       params.columnVisibility = columnVisibility;
+    }
+
+    public IngestParams getIngestPrams() {
+      IngestParams params = new IngestParams(getClientProps(), tableName);
+      populateIngestPrams(params);
       return params;
     }
   }
@@ -164,11 +165,12 @@ public class TestIngest {
   public static void createTable(AccumuloClient client, IngestParams params)
       throws AccumuloException, AccumuloSecurityException, TableExistsException {
     if (params.createTable) {
-      TreeSet<Text> splits = getSplitPoints(params.startRow, params.startRow + params.rows,
-          params.numsplits);
+      TreeSet<Text> splits =
+          getSplitPoints(params.startRow, params.startRow + params.rows, params.numsplits);
 
-      if (!client.tableOperations().exists(params.tableName))
+      if (!client.tableOperations().exists(params.tableName)) {
         client.tableOperations().create(params.tableName);
+      }
       try {
         client.tableOperations().addSplits(params.tableName, splits);
       } catch (TableNotFoundException ex) {
@@ -200,8 +202,9 @@ public class TestIngest {
 
     for (int i = 0; i < 10; i++) {
       bytevals[i] = new byte[dataSize];
-      for (int j = 0; j < dataSize; j++)
+      for (int j = 0; j < dataSize; j++) {
         bytevals[i][j] = letters[i];
+      }
     }
     return bytevals;
   }
@@ -231,9 +234,6 @@ public class TestIngest {
 
     Opts opts = new Opts();
     opts.parseArgs(TestIngest.class.getSimpleName(), args);
-
-    if (opts.debug)
-      Logger.getLogger(TabletServerBatchWriter.class.getName()).setLevel(Level.TRACE);
 
     try (AccumuloClient client = Accumulo.newClient().from(opts.getClientProps()).build()) {
       ingest(client, opts.getIngestPrams());
@@ -309,8 +309,8 @@ public class TestIngest {
           } else {
             byte[] value;
             if (params.random != null) {
-              value = genRandomValue(random, randomValue, params.random, rowid + params.startRow,
-                  j);
+              value =
+                  genRandomValue(random, randomValue, params.random, rowid + params.startRow, j);
             } else {
               value = bytevals[j % bytevals.length];
             }
@@ -325,15 +325,16 @@ public class TestIngest {
           bytesWritten += key.getSize();
 
           if (params.delete) {
-            if (params.timestamp >= 0)
+            if (params.timestamp >= 0) {
               m.putDelete(colf, colq, params.columnVisibility, params.timestamp);
-            else
+            } else {
               m.putDelete(colf, colq, params.columnVisibility);
+            }
           } else {
             byte[] value;
             if (params.random != null) {
-              value = genRandomValue(random, randomValue, params.random, rowid + params.startRow,
-                  j);
+              value =
+                  genRandomValue(random, randomValue, params.random, rowid + params.startRow, j);
             } else {
               value = bytevals[j % bytevals.length];
             }
@@ -349,8 +350,9 @@ public class TestIngest {
         }
 
       }
-      if (bw != null)
+      if (bw != null) {
         bw.addMutation(m);
+      }
     }
 
     if (writer != null) {

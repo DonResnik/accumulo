@@ -31,7 +31,7 @@ import org.apache.accumulo.core.data.Key;
 import org.apache.accumulo.core.data.Value;
 import org.apache.accumulo.core.file.FileSKVWriter;
 import org.apache.accumulo.core.security.ColumnVisibility;
-import org.apache.commons.collections.map.LRUMap;
+import org.apache.commons.collections4.map.LRUMap;
 
 import com.google.common.base.Preconditions;
 
@@ -89,13 +89,13 @@ import com.google.common.base.Preconditions;
 public class RFileWriter implements AutoCloseable {
 
   private FileSKVWriter writer;
-  private final LRUMap validVisibilities;
+  private final LRUMap<ByteSequence,Boolean> validVisibilities;
   private boolean startedLG;
   private boolean startedDefaultLG;
 
   RFileWriter(FileSKVWriter fileSKVWriter, int visCacheSize) {
     this.writer = fileSKVWriter;
-    this.validVisibilities = new LRUMap(visCacheSize);
+    this.validVisibilities = new LRUMap<>(visCacheSize);
   }
 
   private void _startNewLocalityGroup(String name, Set<ByteSequence> columnFamilies)
@@ -206,7 +206,7 @@ public class RFileWriter implements AutoCloseable {
     if (!startedLG) {
       startDefaultLocalityGroup();
     }
-    Boolean wasChecked = (Boolean) validVisibilities.get(key.getColumnVisibilityData());
+    Boolean wasChecked = validVisibilities.get(key.getColumnVisibilityData());
     if (wasChecked == null) {
       byte[] cv = key.getColumnVisibilityData().toArray();
       new ColumnVisibility(cv);

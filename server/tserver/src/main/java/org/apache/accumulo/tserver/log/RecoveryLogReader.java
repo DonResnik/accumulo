@@ -23,13 +23,13 @@ import java.util.AbstractMap;
 import java.util.Iterator;
 import java.util.Map.Entry;
 import java.util.Objects;
+import java.util.PriorityQueue;
 
 import org.apache.accumulo.server.fs.VolumeManager;
 import org.apache.accumulo.server.log.SortedLogState;
 import org.apache.accumulo.tserver.logger.LogEvents;
 import org.apache.accumulo.tserver.logger.LogFileKey;
 import org.apache.accumulo.tserver.logger.LogFileValue;
-import org.apache.commons.collections.buffer.PriorityBuffer;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -111,7 +111,7 @@ public class RecoveryLogReader implements CloseableIterator<Entry<LogFileKey,Log
     }
   }
 
-  private PriorityBuffer heap = new PriorityBuffer();
+  private PriorityQueue<Index> heap = new PriorityQueue<>();
   private Iterator<Entry<LogFileKey,LogFileValue>> iter;
 
   public RecoveryLogReader(VolumeManager fs, Path directory) throws IOException {
@@ -152,7 +152,7 @@ public class RecoveryLogReader implements CloseableIterator<Entry<LogFileKey,Log
 
   @VisibleForTesting
   synchronized boolean next(WritableComparable<?> key, Writable val) throws IOException {
-    Index elt = (Index) heap.remove();
+    Index elt = heap.remove();
     try {
       elt.cache();
       if (elt.cached) {
@@ -170,10 +170,9 @@ public class RecoveryLogReader implements CloseableIterator<Entry<LogFileKey,Log
 
   @VisibleForTesting
   synchronized boolean seek(WritableComparable<?> key) throws IOException {
-    PriorityBuffer reheap = new PriorityBuffer(heap.size());
+    PriorityQueue<Index> reheap = new PriorityQueue<>(heap.size());
     boolean result = false;
-    for (Object obj : heap) {
-      Index index = (Index) obj;
+    for (Index index : heap) {
       try {
         WritableComparable<?> found = index.reader.getClosest(key, index.value, true);
         if (found != null && found.equals(key)) {
@@ -192,8 +191,7 @@ public class RecoveryLogReader implements CloseableIterator<Entry<LogFileKey,Log
   @Override
   public void close() throws IOException {
     IOException problem = null;
-    for (Object obj : heap) {
-      Index index = (Index) obj;
+    for (Index index : heap) {
       try {
         index.reader.close();
       } catch (IOException ex) {

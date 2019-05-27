@@ -27,6 +27,7 @@ import static org.apache.accumulo.tserver.logger.LogEvents.OPEN;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
@@ -84,9 +85,9 @@ import com.google.common.base.Preconditions;
  *
  */
 public class DfsLogger implements Comparable<DfsLogger> {
-  // older versions should no longer be supported in 2.0
-  public static final String LOG_FILE_HEADER_V2 = "--- Log File Header (v2) ---";
+  // older version supported for upgrade
   public static final String LOG_FILE_HEADER_V3 = "--- Log File Header (v3) ---";
+
   /**
    * Simplified encryption technique supported in V4.
    *
@@ -148,8 +149,8 @@ public class DfsLogger implements Comparable<DfsLogger> {
 
   private final Object closeLock = new Object();
 
-  private static final DfsLogger.LogWork CLOSED_MARKER = new DfsLogger.LogWork(null,
-      Durability.FLUSH);
+  private static final DfsLogger.LogWork CLOSED_MARKER =
+      new DfsLogger.LogWork(null, Durability.FLUSH);
 
   private static final LogFileValue EMPTY = new LogFileValue();
 
@@ -226,8 +227,8 @@ public class DfsLogger implements Comparable<DfsLogger> {
         }
         if (expectedReplication == 0 && logFile.getWrappedStream() instanceof DFSOutputStream) {
           try {
-            expectedReplication = ((DFSOutputStream) logFile.getWrappedStream())
-                .getCurrentBlockReplication();
+            expectedReplication =
+                ((DFSOutputStream) logFile.getWrappedStream()).getCurrentBlockReplication();
           } catch (IOException e) {
             fail(work, e, "getting replication level");
           }
@@ -334,8 +335,8 @@ public class DfsLogger implements Comparable<DfsLogger> {
   private DfsLogger(ServerContext context, ServerResources conf) {
     this.context = context;
     this.conf = conf;
-    this.slowFlushMillis = conf.getConfiguration()
-        .getTimeInMillis(Property.TSERV_SLOW_FLUSH_MILLIS);
+    this.slowFlushMillis =
+        conf.getConfiguration().getTimeInMillis(Property.TSERV_SLOW_FLUSH_MILLIS);
   }
 
   public DfsLogger(ServerContext context, ServerResources conf, AtomicLong syncCounter,
@@ -361,28 +362,43 @@ public class DfsLogger implements Comparable<DfsLogger> {
       AccumuloConfiguration conf) throws IOException {
     DataInputStream decryptingInput;
 
-    byte[] magic = DfsLogger.LOG_FILE_HEADER_V4.getBytes(UTF_8);
-    byte[] magicBuffer = new byte[magic.length];
+    byte[] magic4 = DfsLogger.LOG_FILE_HEADER_V4.getBytes(UTF_8);
+    byte[] magic3 = DfsLogger.LOG_FILE_HEADER_V3.getBytes(UTF_8);
+
+    if (magic4.length != magic3.length)
+      throw new AssertionError("Always expect log file headers to be same length : " + magic4.length
+          + " != " + magic3.length);
+
+    byte[] magicBuffer = new byte[magic4.length];
     try {
       input.readFully(magicBuffer);
-      if (Arrays.equals(magicBuffer, magic)) {
+      if (Arrays.equals(magicBuffer, magic4)) {
         byte[] params = CryptoUtils.readParams(input);
-        CryptoService cryptoService = CryptoServiceFactory.newInstance(conf,
-            ClassloaderType.ACCUMULO);
+        CryptoService cryptoService =
+            CryptoServiceFactory.newInstance(conf, ClassloaderType.ACCUMULO);
         CryptoEnvironment env = new CryptoEnvironmentImpl(Scope.WAL, params);
 
         FileDecrypter decrypter = cryptoService.getFileDecrypter(env);
         log.debug("Using {} for decrypting WAL", cryptoService.getClass().getSimpleName());
         decryptingInput = cryptoService instanceof NoCryptoService ? input
             : new DataInputStream(decrypter.decryptStream(input));
-      } else {
-        log.error("Unsupported WAL version.");
-        input.seek(0);
+      } else if (Arrays.equals(magicBuffer, magic3)) {
+        // Read logs files from Accumulo 1.9
+        String cryptoModuleClassname = input.readUTF();
+        if (!cryptoModuleClassname.equals("NullCryptoModule")) {
+          throw new IllegalArgumentException(
+              "Old encryption modules not supported at this time.  Unsupported module : "
+                  + cryptoModuleClassname);
+        }
+
         decryptingInput = input;
+      } else {
+        throw new IllegalArgumentException(
+            "Unsupported write ahead log version " + new String(magicBuffer));
       }
-    } catch (Exception e) {
-      log.warn("Got EOFException trying to read WAL header information,"
-          + " assuming the rest of the file has no data.");
+    } catch (EOFException e) {
+      // Explicitly catch any exceptions that should be converted to LogHeaderIncompleteException
+
       // A TabletServer might have died before the (complete) header was written
       throw new LogHeaderIncompleteException(e);
     }
@@ -407,8 +423,8 @@ public class DfsLogger implements Comparable<DfsLogger> {
     log.debug("DfsLogger.open() begin");
     VolumeManager fs = conf.getFileSystem();
 
-    VolumeChooserEnvironment chooserEnv = new VolumeChooserEnvironmentImpl(ChooserScope.LOGGER,
-        context);
+    VolumeChooserEnvironment chooserEnv =
+        new VolumeChooserEnvironmentImpl(ChooserScope.LOGGER, context);
     logPath = fs.choose(chooserEnv, ServerConstants.getBaseUris(context)) + Path.SEPARATOR
         + ServerConstants.WAL_DIR + Path.SEPARATOR + logger + Path.SEPARATOR + filename;
 

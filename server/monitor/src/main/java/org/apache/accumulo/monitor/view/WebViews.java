@@ -21,7 +21,6 @@ import static org.apache.accumulo.monitor.util.ParameterValidator.ALPHA_NUM_REGE
 import static org.apache.accumulo.monitor.util.ParameterValidator.ALPHA_NUM_REGEX_TABLE_ID;
 import static org.apache.accumulo.monitor.util.ParameterValidator.HOSTNAME_PORT_REGEX;
 import static org.apache.accumulo.monitor.util.ParameterValidator.RESOURCE_REGEX;
-import static org.apache.commons.lang.StringUtils.isBlank;
 import static org.apache.commons.lang.StringUtils.isEmpty;
 import static org.apache.commons.lang.StringUtils.isNotBlank;
 
@@ -31,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import javax.inject.Inject;
 import javax.validation.constraints.Max;
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
@@ -57,7 +57,8 @@ import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
- * Index is responsible of specifying Monitor paths and setting the templates for the HTML code
+ * This class is responsible for specifying Monitor REST Endpoints and setting the templates for the
+ * HTML code
  *
  * @since 2.0.0
  */
@@ -67,6 +68,9 @@ public class WebViews {
 
   private static final Logger log = LoggerFactory.getLogger(WebViews.class);
 
+  @Inject
+  private Monitor monitor;
+
   /**
    * Get HTML for external CSS and JS resources from configuration. See ACCUMULO-4739
    *
@@ -74,10 +78,11 @@ public class WebViews {
    *          map of the MVC model
    */
   private void addExternalResources(Map<String,Object> model) {
-    AccumuloConfiguration conf = Monitor.getContext().getConfiguration();
+    AccumuloConfiguration conf = monitor.getContext().getConfiguration();
     String resourcesProperty = conf.get(Property.MONITOR_RESOURCES_EXTERNAL);
-    if (isEmpty(resourcesProperty))
+    if (isEmpty(resourcesProperty)) {
       return;
+    }
     List<String> monitorResources = new ArrayList<>();
     ObjectMapper objectMapper = new ObjectMapper();
     try {
@@ -98,8 +103,8 @@ public class WebViews {
 
     Map<String,Object> model = new HashMap<>();
     model.put("version", Constants.VERSION);
-    model.put("instance_name", Monitor.cachedInstanceName.get());
-    model.put("instance_id", Monitor.getContext().getInstanceID());
+    model.put("instance_name", monitor.getContext().getInstanceName());
+    model.put("instance_id", monitor.getContext().getInstanceID());
     addExternalResources(model);
     return model;
   }
@@ -151,8 +156,8 @@ public class WebViews {
   @GET
   @Path("tservers")
   @Template(name = "/default.ftl")
-  public Map<String,Object> getTabletServers(
-      @QueryParam("s") @Pattern(regexp = HOSTNAME_PORT_REGEX) String server) {
+  public Map<String,Object>
+      getTabletServers(@QueryParam("s") @Pattern(regexp = HOSTNAME_PORT_REGEX) String server) {
 
     Map<String,Object> model = getModel();
     model.put("title", "Tablet Server Status");
@@ -222,46 +227,6 @@ public class WebViews {
   }
 
   /**
-   * Returns the server activity template
-   *
-   * @param shape
-   *          Shape of visualization
-   * @param size
-   *          Size of visualization
-   * @param motion
-   *          Motion of visualization
-   * @param color
-   *          Color of visualization
-   * @return Server activity model
-   */
-  @GET
-  @Path("vis")
-  @Template(name = "/default.ftl")
-  public Map<String,Object> getServerActivity(
-      @QueryParam("shape") @DefaultValue("circles") @Pattern(
-          regexp = ALPHA_NUM_REGEX_BLANK_OK) String shape,
-      @QueryParam("size") @DefaultValue("40") @Min(1) @Max(100) int size,
-      @QueryParam("motion") @DefaultValue("") @Pattern(
-          regexp = ALPHA_NUM_REGEX_BLANK_OK) String motion,
-      @QueryParam("color") @DefaultValue("allavg") @Pattern(
-          regexp = ALPHA_NUM_REGEX_BLANK_OK) String color) {
-
-    shape = isNotBlank(shape) ? shape : "circles";
-    color = isNotBlank(color) ? color : "allavg";
-
-    Map<String,Object> model = getModel();
-    model.put("title", "Server Activity");
-    model.put("template", "vis.ftl");
-
-    model.put("shape", shape);
-    model.put("size", String.valueOf(size));
-    model.put("motion", isBlank(motion) ? "" : motion.trim());
-    model.put("color", isBlank(color) ? "allavg" : color); // Are there a set of acceptable values?
-
-    return model;
-  }
-
-  /**
    * Returns the tables template
    *
    * @return Tables model
@@ -293,7 +258,7 @@ public class WebViews {
       @PathParam("tableID") @NotNull @Pattern(regexp = ALPHA_NUM_REGEX_TABLE_ID) String tableID)
       throws TableNotFoundException {
 
-    String tableName = Tables.getTableName(Monitor.getContext(), TableId.of(tableID));
+    String tableName = Tables.getTableName(monitor.getContext(), TableId.of(tableID));
 
     Map<String,Object> model = getModel();
     model.put("title", "Table Status");
@@ -365,8 +330,8 @@ public class WebViews {
   @GET
   @Path("trace/show")
   @Template(name = "/default.ftl")
-  public Map<String,Object> getTraceShow(
-      @QueryParam("id") @NotNull @Pattern(regexp = ALPHA_NUM_REGEX) String id) {
+  public Map<String,Object>
+      getTraceShow(@QueryParam("id") @NotNull @Pattern(regexp = ALPHA_NUM_REGEX) String id) {
 
     Map<String,Object> model = getModel();
     model.put("title", "Trace ID " + id);
@@ -405,8 +370,8 @@ public class WebViews {
   @GET
   @Path("problems")
   @Template(name = "/default.ftl")
-  public Map<String,Object> getProblems(
-      @QueryParam("table") @Pattern(regexp = ALPHA_NUM_REGEX_BLANK_OK) String table) {
+  public Map<String,Object>
+      getProblems(@QueryParam("table") @Pattern(regexp = ALPHA_NUM_REGEX_BLANK_OK) String table) {
 
     Map<String,Object> model = getModel();
     model.put("title", "Per-Table Problem Report");

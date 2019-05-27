@@ -81,6 +81,7 @@ public class VerifyIngest {
 
     public VerifyParams getVerifyParams() {
       VerifyParams params = new VerifyParams(getClientProps(), tableName);
+      populateIngestPrams(params);
       params.useGet = useGet;
       return params;
     }
@@ -92,8 +93,8 @@ public class VerifyIngest {
     if (opts.trace) {
       TraceUtil.enableClientTraces(null, null, new Properties());
     }
-    try (TraceScope clientSpan = Trace.startSpan(VerifyIngest.class.getSimpleName(),
-        Sampler.ALWAYS)) {
+    try (TraceScope clientSpan =
+        Trace.startSpan(VerifyIngest.class.getSimpleName(), Sampler.ALWAYS)) {
       Span span = clientSpan.getSpan();
       if (span != null)
         span.addKVAnnotation("cmdLine", Arrays.asList(args).toString());

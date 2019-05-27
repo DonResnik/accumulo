@@ -389,8 +389,8 @@ public class ShellServerIT extends SharedMiniClusterBase {
       fs.mkdirs(importDir);
 
       // Implement a poor-man's DistCp
-      try (BufferedReader reader = new BufferedReader(
-          new FileReader(new File(exportDir, "distcp.txt")))) {
+      try (BufferedReader reader =
+          new BufferedReader(new FileReader(new File(exportDir, "distcp.txt")))) {
         for (String line; (line = reader.readLine()) != null;) {
           Path exportedFile = new Path(line);
           // There isn't a cp on FileSystem??
@@ -501,15 +501,20 @@ public class ShellServerIT extends SharedMiniClusterBase {
     ts.exec("deletetable -f " + table);
   }
 
+  /*
+   * This test should be deleted when the debug command is removed
+   */
+  @Deprecated
   @Test
   public void debug() throws Exception {
-    ts.exec("debug", true, "off", true);
-    ts.exec("debug on", true);
-    ts.exec("debug", true, "on", true);
-    ts.exec("debug off", true);
-    ts.exec("debug", true, "off", true);
-    ts.exec("debug debug", false);
-    ts.exec("debug debug debug", false);
+    String expectMsg = "The debug command is deprecated";
+    ts.exec("debug", false, expectMsg);
+    ts.exec("debug on", false, expectMsg);
+    ts.exec("debug", false, expectMsg);
+    ts.exec("debug off", false, expectMsg);
+    ts.exec("debug", false, expectMsg);
+    ts.exec("debug debug", false, expectMsg);
+    ts.exec("debug debug debug", false, expectMsg);
   }
 
   @Test
@@ -1805,8 +1810,8 @@ public class ShellServerIT extends SharedMiniClusterBase {
     }
     ts.exec("createtable t");
     // Assert that the TabletServer does not know anything about our class
-    String result = ts
-        .exec("setiter -scan -n reverse -t t -p 21 -class " + VALUE_REVERSING_ITERATOR);
+    String result =
+        ts.exec("setiter -scan -n reverse -t t -p 21 -class " + VALUE_REVERSING_ITERATOR);
     assertTrue(result.contains("class not found"));
     make10();
     setupFakeContextPath();
@@ -1927,12 +1932,12 @@ public class ShellServerIT extends SharedMiniClusterBase {
   private static final String REAL_CONTEXT = "REAL";
   private static final String REAL_CONTEXT_CLASSPATH = "file://" + System.getProperty("user.dir")
       + "/target/" + ShellServerIT.class.getSimpleName() + "-real-iterators.jar";
-  private static final String VALUE_REVERSING_ITERATOR = "org.apache.accumulo.test."
-      + "functional.ValueReversingIterator";
-  private static final String SUMMING_COMBINER_ITERATOR = "org.apache.accumulo.core."
-      + "iterators.user.SummingCombiner";
-  private static final String COLUMN_FAMILY_COUNTER_ITERATOR = "org.apache.accumulo.core.iterators"
-      + ".ColumnFamilyCounter";
+  private static final String VALUE_REVERSING_ITERATOR =
+      "org.apache.accumulo.test." + "functional.ValueReversingIterator";
+  private static final String SUMMING_COMBINER_ITERATOR =
+      "org.apache.accumulo.core." + "iterators.user.SummingCombiner";
+  private static final String COLUMN_FAMILY_COUNTER_ITERATOR =
+      "org.apache.accumulo.core.iterators" + ".ColumnFamilyCounter";
 
   private void setupRealContextPath() throws IOException {
     // Copy the test iterators jar to tmp

@@ -39,31 +39,31 @@ public class EmbeddedWebServer {
   private final ServerConnector connector;
   private final ServletContextHandler handler;
 
-  public EmbeddedWebServer(String host, int port) {
+  public EmbeddedWebServer(Monitor monitor, int port) {
     server = new Server();
-    final AccumuloConfiguration conf = Monitor.getContext().getConfiguration();
+    final AccumuloConfiguration conf = monitor.getContext().getConfiguration();
     connector = new ServerConnector(server, getConnectionFactories(conf));
-    connector.setHost(host);
+    connector.setHost(monitor.getHostname());
     connector.setPort(port);
 
-    handler = new ServletContextHandler(
-        ServletContextHandler.SESSIONS | ServletContextHandler.SECURITY);
+    handler =
+        new ServletContextHandler(ServletContextHandler.SESSIONS | ServletContextHandler.SECURITY);
     handler.getSessionHandler().getSessionCookieConfig().setHttpOnly(true);
     handler.setContextPath("/");
   }
 
   private static AbstractConnectionFactory[] getConnectionFactories(AccumuloConfiguration conf) {
     HttpConnectionFactory httpFactory = new HttpConnectionFactory();
-    EnumSet<Property> requireForSecure = EnumSet.of(Property.MONITOR_SSL_KEYSTORE,
-        Property.MONITOR_SSL_KEYSTOREPASS, Property.MONITOR_SSL_TRUSTSTORE,
-        Property.MONITOR_SSL_TRUSTSTOREPASS);
+    EnumSet<Property> requireForSecure =
+        EnumSet.of(Property.MONITOR_SSL_KEYSTORE, Property.MONITOR_SSL_KEYSTOREPASS,
+            Property.MONITOR_SSL_TRUSTSTORE, Property.MONITOR_SSL_TRUSTSTOREPASS);
 
     if (requireForSecure.stream().map(p -> conf.get(p)).anyMatch(s -> s == null || s.isEmpty())) {
       LOG.debug("Not configuring Jetty to use TLS");
       return new AbstractConnectionFactory[] {httpFactory};
     } else {
       LOG.debug("Configuring Jetty to use TLS");
-      final SslContextFactory sslContextFactory = new SslContextFactory();
+      final SslContextFactory sslContextFactory = new SslContextFactory.Server();
       // If the key password is the same as the keystore password, we don't
       // have to explicitly set it. Thus, if the user doesn't provide a key
       // password, don't set anything.
@@ -93,8 +93,8 @@ public class EmbeddedWebServer {
         sslContextFactory.setIncludeProtocols(StringUtils.split(includeProtocols, ','));
       }
 
-      SslConnectionFactory sslFactory = new SslConnectionFactory(sslContextFactory,
-          httpFactory.getProtocol());
+      SslConnectionFactory sslFactory =
+          new SslConnectionFactory(sslContextFactory, httpFactory.getProtocol());
       return new AbstractConnectionFactory[] {sslFactory, httpFactory};
     }
   }

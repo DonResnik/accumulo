@@ -33,7 +33,6 @@ import org.apache.accumulo.core.clientImpl.Credentials;
 import org.apache.accumulo.core.conf.Property;
 import org.apache.accumulo.core.conf.SiteConfiguration;
 import org.apache.accumulo.core.securityImpl.thrift.TCredentials;
-import org.apache.accumulo.server.ServerConstants;
 import org.apache.hadoop.io.Writable;
 
 /**
@@ -61,8 +60,8 @@ public final class SystemCredentials extends Credentials {
       // principal in the SystemToken as it would break equality when
       // different Accumulo servers are using different kerberos principals are their accumulo
       // principal
-      principal = SecurityUtil
-          .getServerPrincipal(siteConfig.get(Property.GENERAL_KERBEROS_PRINCIPAL));
+      principal =
+          SecurityUtil.getServerPrincipal(siteConfig.get(Property.GENERAL_KERBEROS_PRINCIPAL));
     }
     return new SystemCredentials(instanceID, principal, SystemToken.get(instanceID, siteConfig));
   }
@@ -81,6 +80,12 @@ public final class SystemCredentials extends Credentials {
    * @since 1.6.0
    */
   public static final class SystemToken extends PasswordToken {
+
+    /**
+     * Accumulo servers will only communicate with each other when this is the same. Bumped for 2.0
+     * to prevent 1.9 and 2.0 servers from communicating.
+     */
+    private static final Integer INTERNAL_WIRE_VERSION = 4;
 
     /**
      * A Constructor for {@link Writable}.
@@ -102,7 +107,7 @@ public final class SystemCredentials extends Credentials {
       }
 
       // seed the config with the version and instance id, so at least it's not empty
-      md.update(ServerConstants.WIRE_VERSION.toString().getBytes(UTF_8));
+      md.update(INTERNAL_WIRE_VERSION.toString().getBytes(UTF_8));
       md.update(instanceIdBytes);
 
       for (Entry<String,String> entry : siteConfig) {
@@ -114,7 +119,7 @@ public final class SystemCredentials extends Credentials {
       }
       confChecksum = md.digest();
 
-      int wireVersion = ServerConstants.WIRE_VERSION;
+      int wireVersion = INTERNAL_WIRE_VERSION;
 
       ByteArrayOutputStream bytes = new ByteArrayOutputStream(
           3 * (Integer.SIZE / Byte.SIZE) + instanceIdBytes.length + confChecksum.length);

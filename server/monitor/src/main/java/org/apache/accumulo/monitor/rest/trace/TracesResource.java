@@ -29,6 +29,7 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.TreeMap;
 
+import javax.inject.Inject;
 import javax.validation.constraints.Max;
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
@@ -75,6 +76,9 @@ import org.apache.hadoop.security.UserGroupInformation;
 @Path("/trace")
 @Produces({MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML})
 public class TracesResource {
+
+  @Inject
+  private Monitor monitor;
 
   /**
    * Generates a trace summary
@@ -255,8 +259,8 @@ public class TracesResource {
       }
       if (hasAnnotations) {
         for (Annotation entry : node.annotations) {
-          AnnotationInformation annotations = new AnnotationInformation(entry.getMsg(),
-              entry.getTime() - finalStart);
+          AnnotationInformation annotations =
+              new AnnotationInformation(entry.getMsg(), entry.getTime() - finalStart);
           addlData.addAnnotations(annotations);
         }
       }
@@ -295,13 +299,13 @@ public class TracesResource {
   }
 
   protected Pair<AccumuloClient,UserGroupInformation> getClient() {
-    AccumuloConfiguration conf = Monitor.getContext().getConfiguration();
+    AccumuloConfiguration conf = monitor.getContext().getConfiguration();
     final boolean saslEnabled = conf.getBoolean(Property.INSTANCE_RPC_SASL_ENABLED);
     UserGroupInformation traceUgi = null;
     final String principal;
     final AuthenticationToken at;
-    Map<String,String> loginMap = conf
-        .getAllPropertiesWithPrefix(Property.TRACE_TOKEN_PROPERTY_PREFIX);
+    Map<String,String> loginMap =
+        conf.getAllPropertiesWithPrefix(Property.TRACE_TOKEN_PROPERTY_PREFIX);
     // May be null
     String keytab = loginMap.get(Property.TRACE_TOKEN_PROPERTY_PREFIX.getKey() + "keytab");
     if (keytab == null || keytab.length() == 0) {
@@ -339,7 +343,7 @@ public class TracesResource {
       at = null;
     }
 
-    java.util.Properties props = Monitor.getContext().getProperties();
+    java.util.Properties props = monitor.getContext().getProperties();
     AccumuloClient client;
     if (traceUgi != null) {
       try {
@@ -362,7 +366,7 @@ public class TracesResource {
 
   private Scanner getScanner(AccumuloClient client) throws AccumuloException {
     try {
-      AccumuloConfiguration conf = Monitor.getContext().getConfiguration();
+      AccumuloConfiguration conf = monitor.getContext().getConfiguration();
       final String table = conf.get(Property.TRACE_TABLE);
       if (!client.tableOperations().exists(table)) {
         return null;

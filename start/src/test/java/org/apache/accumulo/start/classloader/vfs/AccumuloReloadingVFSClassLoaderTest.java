@@ -29,8 +29,6 @@ import org.apache.commons.vfs2.FileObject;
 import org.apache.commons.vfs2.FileSystemException;
 import org.apache.commons.vfs2.FileSystemManager;
 import org.apache.commons.vfs2.impl.VFSClassLoader;
-import org.apache.log4j.Level;
-import org.apache.log4j.Logger;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Ignore;
@@ -39,15 +37,13 @@ import org.junit.rules.TemporaryFolder;
 
 public class AccumuloReloadingVFSClassLoaderTest {
 
-  private TemporaryFolder folder1 = new TemporaryFolder(
-      new File(System.getProperty("user.dir") + "/target"));
+  private TemporaryFolder folder1 =
+      new TemporaryFolder(new File(System.getProperty("user.dir") + "/target"));
   String folderPath;
   private FileSystemManager vfs;
 
   @Before
   public void setup() throws Exception {
-    Logger.getRootLogger().setLevel(Level.ERROR);
-
     vfs = ContextManagerTest.getVFS();
 
     folder1.create();
@@ -60,10 +56,11 @@ public class AccumuloReloadingVFSClassLoaderTest {
   FileObject[] createFileSystems(FileObject[] fos) throws FileSystemException {
     FileObject[] rfos = new FileObject[fos.length];
     for (int i = 0; i < fos.length; i++) {
-      if (vfs.canCreateFileSystem(fos[i]))
+      if (vfs.canCreateFileSystem(fos[i])) {
         rfos[i] = vfs.createFileSystem(fos[i]);
-      else
+      } else {
         rfos[i] = fos[i];
+      }
     }
 
     return rfos;

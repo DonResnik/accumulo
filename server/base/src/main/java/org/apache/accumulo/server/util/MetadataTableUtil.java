@@ -17,9 +17,6 @@
 package org.apache.accumulo.server.util;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.apache.accumulo.core.metadata.schema.MetadataSchema.TabletsSection.ServerColumnFamily.DIRECTORY_COLUMN;
-import static org.apache.accumulo.core.metadata.schema.MetadataSchema.TabletsSection.ServerColumnFamily.TIME_COLUMN;
-import static org.apache.accumulo.core.metadata.schema.MetadataSchema.TabletsSection.TabletColumnFamily.PREV_ROW_COLUMN;
 import static org.apache.accumulo.fate.util.UtilWaitThread.sleepUninterruptibly;
 
 import java.io.IOException;
@@ -72,7 +69,6 @@ import org.apache.accumulo.core.metadata.schema.MetadataSchema.TabletsSection.Se
 import org.apache.accumulo.core.metadata.schema.TabletDeletedException;
 import org.apache.accumulo.core.metadata.schema.TabletMetadata;
 import org.apache.accumulo.core.metadata.schema.TabletsMetadata;
-import org.apache.accumulo.core.replication.ReplicationTable;
 import org.apache.accumulo.core.security.Authorizations;
 import org.apache.accumulo.core.tabletserver.log.LogEntry;
 import org.apache.accumulo.core.tabletserver.thrift.ConstraintViolationException;
@@ -89,7 +85,6 @@ import org.apache.accumulo.server.fs.FileRef;
 import org.apache.accumulo.server.fs.VolumeChooserEnvironment;
 import org.apache.accumulo.server.fs.VolumeChooserEnvironmentImpl;
 import org.apache.accumulo.server.fs.VolumeManager;
-import org.apache.accumulo.server.tablets.TabletTime;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
@@ -106,7 +101,6 @@ import com.google.common.collect.Iterables;
 public class MetadataTableUtil {
 
   private static final Text EMPTY_TEXT = new Text();
-  private static final byte[] EMPTY_BYTES = new byte[0];
   private static Map<Credentials,Writer> root_tables = new HashMap<>();
   private static Map<Credentials,Writer> metadata_tables = new HashMap<>();
   private static final Logger log = LoggerFactory.getLogger(MetadataTableUtil.class);
@@ -436,8 +430,8 @@ public class MetadataTableUtil {
             new DataFileValue(lowSize, lowEntries, entry.getValue().getTime()));
 
         long highSize = (long) Math.ceil((entry.getValue().getSize() * (1.0 - splitRatio)));
-        long highEntries = (long) Math
-            .ceil((entry.getValue().getNumEntries() * (1.0 - splitRatio)));
+        long highEntries =
+            (long) Math.ceil((entry.getValue().getNumEntries() * (1.0 - splitRatio)));
         highDatafileSizes.put(entry.getKey(),
             new DataFileValue(highSize, highEntries, entry.getValue().getTime()));
       }
@@ -532,9 +526,9 @@ public class MetadataTableUtil {
     }
   }
 
-  public static Pair<List<LogEntry>,SortedMap<FileRef,DataFileValue>> getFileAndLogEntries(
-      ServerContext context, KeyExtent extent)
-      throws KeeperException, InterruptedException, IOException {
+  public static Pair<List<LogEntry>,SortedMap<FileRef,DataFileValue>>
+      getFileAndLogEntries(ServerContext context, KeyExtent extent)
+          throws KeeperException, InterruptedException, IOException {
     ArrayList<LogEntry> result = new ArrayList<>();
     TreeMap<FileRef,DataFileValue> sizes = new TreeMap<>();
 
@@ -640,8 +634,8 @@ public class MetadataTableUtil {
     LogEntryIterator(ServerContext context)
         throws IOException, KeeperException, InterruptedException {
       zookeeperEntries = getLogEntries(context, RootTable.EXTENT).iterator();
-      rootTableEntries = getLogEntries(context, new KeyExtent(MetadataTable.ID, null, null))
-          .iterator();
+      rootTableEntries =
+          getLogEntries(context, new KeyExtent(MetadataTable.ID, null, null)).iterator();
       try {
         Scanner scanner = context.createScanner(MetadataTable.NAME, Authorizations.EMPTY);
         log.info("Setting range to {}", MetadataSchema.TabletsSection.getRange());
@@ -789,10 +783,10 @@ public class MetadataTableUtil {
       AccumuloClient client, BatchWriter bw)
       throws TableNotFoundException, MutationsRejectedException {
 
-    Iterator<TabletMetadata> srcIter = createCloneScanner(testTableName, srcTableId, client)
-        .iterator();
-    Iterator<TabletMetadata> cloneIter = createCloneScanner(testTableName, tableId, client)
-        .iterator();
+    Iterator<TabletMetadata> srcIter =
+        createCloneScanner(testTableName, srcTableId, client).iterator();
+    Iterator<TabletMetadata> cloneIter =
+        createCloneScanner(testTableName, tableId, client).iterator();
 
     if (!cloneIter.hasNext() || !srcIter.hasNext())
       throw new RuntimeException(
@@ -936,8 +930,8 @@ public class MetadataTableUtil {
   public static void removeBulkLoadEntries(AccumuloClient client, TableId tableId, long tid)
       throws Exception {
     try (
-        Scanner mscanner = new IsolatedScanner(
-            client.createScanner(MetadataTable.NAME, Authorizations.EMPTY));
+        Scanner mscanner =
+            new IsolatedScanner(client.createScanner(MetadataTable.NAME, Authorizations.EMPTY));
         BatchWriter bw = client.createBatchWriter(MetadataTable.NAME, new BatchWriterConfig())) {
       mscanner.setRange(new KeyExtent(tableId, null, null).toMetadataRange());
       mscanner.fetchColumnFamily(TabletsSection.BulkFileColumnFamily.NAME);
@@ -1020,89 +1014,8 @@ public class MetadataTableUtil {
     update(context, m, new KeyExtent(TableId.of("anythingNotMetadata"), null, null));
   }
 
-  /**
-   * During an upgrade from 1.6 to 1.7, we need to add the replication table
-   */
-  public static void createReplicationTable(ServerContext context) {
-
-    VolumeChooserEnvironment chooserEnv = new VolumeChooserEnvironmentImpl(ReplicationTable.ID,
-        null, context);
-    String dir = context.getVolumeManager().choose(chooserEnv, ServerConstants.getBaseUris(context))
-        + Constants.HDFS_TABLES_DIR + Path.SEPARATOR + ReplicationTable.ID
-        + Constants.DEFAULT_TABLET_LOCATION;
-
-    Mutation m = new Mutation(new Text(TabletsSection.getRow(ReplicationTable.ID, null)));
-    m.put(DIRECTORY_COLUMN.getColumnFamily(), DIRECTORY_COLUMN.getColumnQualifier(), 0,
-        new Value(dir.getBytes(UTF_8)));
-    m.put(TIME_COLUMN.getColumnFamily(), TIME_COLUMN.getColumnQualifier(), 0,
-        new Value((TabletTime.LOGICAL_TIME_ID + "0").getBytes(UTF_8)));
-    m.put(PREV_ROW_COLUMN.getColumnFamily(), PREV_ROW_COLUMN.getColumnQualifier(), 0,
-        KeyExtent.encodePrevEndRow(null));
-    update(context, getMetadataTable(context), null, m);
-  }
-
-  /**
-   * During an upgrade we need to move deletion requests for files under the !METADATA table to the
-   * root tablet.
-   */
-  public static void moveMetaDeleteMarkers(ServerContext context) {
-    String oldDeletesPrefix = "!!~del";
-    Range oldDeletesRange = new Range(oldDeletesPrefix, true, "!!~dem", false);
-
-    // move old delete markers to new location, to standardize table schema between all metadata
-    // tables
-    try (Scanner scanner = new ScannerImpl(context, RootTable.ID, Authorizations.EMPTY)) {
-      scanner.setRange(oldDeletesRange);
-      for (Entry<Key,Value> entry : scanner) {
-        String row = entry.getKey().getRow().toString();
-        if (row.startsWith(oldDeletesPrefix)) {
-          moveDeleteEntry(context, RootTable.OLD_EXTENT, entry, row, oldDeletesPrefix);
-        } else {
-          break;
-        }
-      }
-    }
-  }
-
-  public static void moveMetaDeleteMarkersFrom14(ServerContext context) {
-    // new KeyExtent is only added to force update to write to the metadata table, not the root
-    // table
-    KeyExtent notMetadata = new KeyExtent(TableId.of("anythingNotMetadata"), null, null);
-
-    // move delete markers from the normal delete keyspace to the root tablet delete keyspace if the
-    // files are for the !METADATA table
-    try (Scanner scanner = new ScannerImpl(context, MetadataTable.ID, Authorizations.EMPTY)) {
-      scanner.setRange(MetadataSchema.DeletesSection.getRange());
-      for (Entry<Key,Value> entry : scanner) {
-        String row = entry.getKey().getRow().toString();
-        if (row.startsWith(MetadataSchema.DeletesSection.getRowPrefix() + "/" + MetadataTable.ID)) {
-          moveDeleteEntry(context, notMetadata, entry, row,
-              MetadataSchema.DeletesSection.getRowPrefix());
-        } else {
-          break;
-        }
-      }
-    }
-  }
-
-  private static void moveDeleteEntry(ServerContext context, KeyExtent oldExtent,
-      Entry<Key,Value> entry, String rowID, String prefix) {
-    String filename = rowID.substring(prefix.length());
-
-    // add the new entry first
-    log.info("Moving {} marker in {}", filename, RootTable.NAME);
-    Mutation m = new Mutation(MetadataSchema.DeletesSection.getRowPrefix() + filename);
-    m.put(EMPTY_BYTES, EMPTY_BYTES, EMPTY_BYTES);
-    update(context, m, RootTable.EXTENT);
-
-    // then remove the old entry
-    m = new Mutation(entry.getKey().getRow());
-    m.putDelete(EMPTY_BYTES, EMPTY_BYTES);
-    update(context, m, oldExtent);
-  }
-
-  public static SortedMap<Text,SortedMap<ColumnFQ,Value>> getTabletEntries(
-      SortedMap<Key,Value> tabletKeyValues, List<ColumnFQ> columns) {
+  public static SortedMap<Text,SortedMap<ColumnFQ,Value>>
+      getTabletEntries(SortedMap<Key,Value> tabletKeyValues, List<ColumnFQ> columns) {
     TreeMap<Text,SortedMap<ColumnFQ,Value>> tabletEntries = new TreeMap<>();
 
     HashSet<ColumnFQ> colSet = null;

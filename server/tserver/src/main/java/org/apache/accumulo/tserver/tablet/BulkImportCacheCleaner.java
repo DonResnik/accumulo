@@ -39,17 +39,17 @@ public class BulkImportCacheCleaner implements Runnable {
   public void run() {
     // gather the list of transactions the tablets have cached
     final Set<Long> tids = new HashSet<>();
-    for (Tablet tablet : server.getOnlineTablets()) {
+    for (Tablet tablet : server.getOnlineTablets().values()) {
       tids.addAll(tablet.getBulkIngestedFiles().keySet());
     }
     try {
       // get the current transactions from ZooKeeper
-      final Set<Long> allTransactionsAlive = ZooArbitrator.allTransactionsAlive(server.getContext(),
-          Constants.BULK_ARBITRATOR_TYPE);
+      final Set<Long> allTransactionsAlive =
+          ZooArbitrator.allTransactionsAlive(server.getContext(), Constants.BULK_ARBITRATOR_TYPE);
       // remove any that are still alive
       tids.removeAll(allTransactionsAlive);
       // cleanup any memory of these transactions
-      for (Tablet tablet : server.getOnlineTablets()) {
+      for (Tablet tablet : server.getOnlineTablets().values()) {
         tablet.cleanupBulkLoadedFiles(tids);
       }
     } catch (KeeperException | InterruptedException e) {

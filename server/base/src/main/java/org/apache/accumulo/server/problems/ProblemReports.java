@@ -48,7 +48,7 @@ import org.apache.accumulo.fate.util.LoggingRunnable;
 import org.apache.accumulo.fate.zookeeper.IZooReaderWriter;
 import org.apache.accumulo.server.ServerContext;
 import org.apache.accumulo.server.util.MetadataTableUtil;
-import org.apache.commons.collections.map.LRUMap;
+import org.apache.commons.collections4.map.LRUMap;
 import org.apache.hadoop.io.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,7 +57,7 @@ public class ProblemReports implements Iterable<ProblemReport> {
 
   private static final Logger log = LoggerFactory.getLogger(ProblemReports.class);
 
-  private final LRUMap problemReports = new LRUMap(1000);
+  private final LRUMap<ProblemReport,Long> problemReports = new LRUMap<>(1000);
 
   /**
    * use a thread pool so that reporting a problem never blocks

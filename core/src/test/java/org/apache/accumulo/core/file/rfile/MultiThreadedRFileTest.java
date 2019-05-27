@@ -61,21 +61,22 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.log4j.Logger;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 public class MultiThreadedRFileTest {
 
-  private static final Logger LOG = Logger.getLogger(MultiThreadedRFileTest.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedRFileTest.class);
   private static final Collection<ByteSequence> EMPTY_COL_FAMS = new ArrayList<>();
 
   @Rule
-  public TemporaryFolder tempFolder = new TemporaryFolder(
-      new File(System.getProperty("user.dir") + "/target"));
+  public TemporaryFolder tempFolder =
+      new TemporaryFolder(new File(System.getProperty("user.dir") + "/target"));
 
   private static void checkIndex(Reader reader) throws IOException {
     FileSKVIterator indexIter = reader.getIndex();
@@ -83,16 +84,18 @@ public class MultiThreadedRFileTest {
     if (indexIter.hasTop()) {
       Key lastKey = new Key(indexIter.getTopKey());
 
-      if (reader.getFirstKey().compareTo(lastKey) > 0)
+      if (reader.getFirstKey().compareTo(lastKey) > 0) {
         throw new RuntimeException(
             "First key out of order " + reader.getFirstKey() + " " + lastKey);
+      }
 
       indexIter.next();
 
       while (indexIter.hasTop()) {
-        if (lastKey.compareTo(indexIter.getTopKey()) > 0)
+        if (lastKey.compareTo(indexIter.getTopKey()) > 0) {
           throw new RuntimeException(
               "Indext out of order " + lastKey + " " + indexIter.getTopKey());
+        }
 
         lastKey = new Key(indexIter.getTopKey());
         indexIter.next();
@@ -118,8 +121,9 @@ public class MultiThreadedRFileTest {
 
     public TestRFile(AccumuloConfiguration accumuloConfiguration) {
       this.accumuloConfiguration = accumuloConfiguration;
-      if (this.accumuloConfiguration == null)
+      if (this.accumuloConfiguration == null) {
         this.accumuloConfiguration = DefaultConfiguration.getInstance();
+      }
     }
 
     public void close() throws IOException {
@@ -154,16 +158,17 @@ public class MultiThreadedRFileTest {
       dos = fs.create(path, true);
       BCFile.Writer _cbw = new BCFile.Writer(dos, null, "gz", conf,
           CryptoServiceFactory.newInstance(accumuloConfiguration, ClassloaderType.JAVA));
-      SamplerConfigurationImpl samplerConfig = SamplerConfigurationImpl
-          .newSamplerConfig(accumuloConfiguration);
+      SamplerConfigurationImpl samplerConfig =
+          SamplerConfigurationImpl.newSamplerConfig(accumuloConfiguration);
       Sampler sampler = null;
       if (samplerConfig != null) {
         sampler = SamplerFactory.newSampler(samplerConfig, accumuloConfiguration);
       }
       writer = new RFile.Writer(_cbw, 1000, 1000, samplerConfig, sampler);
 
-      if (startDLG)
+      if (startDLG) {
         writer.startDefaultLocalityGroup();
+      }
     }
 
     public void openWriter() throws IOException {
@@ -217,8 +222,8 @@ public class MultiThreadedRFileTest {
       justification = "information put into error message is safe and used for testing")
   @Test
   public void testMultipleReaders() throws IOException {
-    final List<Throwable> threadExceptions = Collections
-        .synchronizedList(new ArrayList<Throwable>());
+    final List<Throwable> threadExceptions =
+        Collections.synchronizedList(new ArrayList<Throwable>());
     Map<String,MutableInt> messages = new HashMap<>();
     Map<String,String> stackTrace = new HashMap<>();
 
@@ -285,8 +290,8 @@ public class MultiThreadedRFileTest {
     }
 
     for (String message : messages.keySet()) {
-      LOG.error(messages.get(message) + ": " + message);
-      LOG.error(stackTrace.get(message));
+      LOG.error("{}: {}", messages.get(message), message);
+      LOG.error("{}", stackTrace.get(message));
     }
 
     assertTrue(threadExceptions.isEmpty());

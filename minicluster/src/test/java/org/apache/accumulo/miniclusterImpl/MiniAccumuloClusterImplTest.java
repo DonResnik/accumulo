@@ -38,8 +38,6 @@ import org.apache.accumulo.core.metadata.RootTable;
 import org.apache.accumulo.core.security.Authorizations;
 import org.apache.accumulo.minicluster.ServerType;
 import org.apache.commons.io.FileUtils;
-import org.apache.log4j.Level;
-import org.apache.log4j.Logger;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -58,16 +56,14 @@ public class MiniAccumuloClusterImplTest {
 
   @BeforeClass
   public static void setupMiniCluster() throws Exception {
-    Logger.getLogger("org.apache.zookeeper").setLevel(Level.ERROR);
-
     File baseDir = new File(System.getProperty("user.dir") + "/target/mini-tests");
     assertTrue(baseDir.mkdirs() || baseDir.isDirectory());
     testDir = new File(baseDir, MiniAccumuloClusterImplTest.class.getName());
     FileUtils.deleteQuietly(testDir);
     assertTrue(testDir.mkdir());
 
-    MiniAccumuloConfigImpl config = new MiniAccumuloConfigImpl(testDir, "superSecret")
-        .setJDWPEnabled(true);
+    MiniAccumuloConfigImpl config =
+        new MiniAccumuloConfigImpl(testDir, "superSecret").setJDWPEnabled(true);
     // expressly set number of tservers since we assert it later, in case the default changes
     config.setNumTservers(NUM_TSERVERS);
     accumulo = new MiniAccumuloClusterImpl(config);

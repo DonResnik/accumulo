@@ -28,6 +28,7 @@ import org.apache.accumulo.core.data.Range;
 import org.apache.accumulo.core.security.Authorizations;
 import org.apache.accumulo.core.util.BadArgumentException;
 import org.apache.accumulo.shell.Shell;
+import org.apache.accumulo.shell.Shell.Command;
 import org.apache.accumulo.tracer.TraceDump;
 import org.apache.commons.cli.CommandLine;
 import org.apache.hadoop.io.Text;
@@ -35,7 +36,7 @@ import org.apache.htrace.Sampler;
 import org.apache.htrace.Trace;
 import org.apache.htrace.TraceScope;
 
-public class TraceCommand extends DebugCommand {
+public class TraceCommand extends Command {
 
   private TraceScope traceScope = null;
 
@@ -45,8 +46,8 @@ public class TraceCommand extends DebugCommand {
     if (cl.getArgs().length == 1) {
       if (cl.getArgs()[0].equalsIgnoreCase("on")) {
         if (traceScope == null) {
-          traceScope = Trace.startSpan("shell:" + shellState.getAccumuloClient().whoami(),
-              Sampler.ALWAYS);
+          traceScope =
+              Trace.startSpan("shell:" + shellState.getAccumuloClient().whoami(), Sampler.ALWAYS);
         }
       } else if (cl.getArgs()[0].equalsIgnoreCase("off")) {
         if (traceScope != null) {
@@ -58,12 +59,12 @@ public class TraceCommand extends DebugCommand {
           for (int i = 0; i < 30; i++) {
             sb = new StringBuilder();
             try {
-              final Map<String,String> properties = shellState.getAccumuloClient()
-                  .instanceOperations().getSystemConfiguration();
+              final Map<String,String> properties =
+                  shellState.getAccumuloClient().instanceOperations().getSystemConfiguration();
               final String table = properties.get(Property.TRACE_TABLE.getKey());
               final String user = shellState.getAccumuloClient().whoami();
-              final Authorizations auths = shellState.getAccumuloClient().securityOperations()
-                  .getUserAuthorizations(user);
+              final Authorizations auths =
+                  shellState.getAccumuloClient().securityOperations().getUserAuthorizations(user);
               final Scanner scanner = shellState.getAccumuloClient().createScanner(table, auths);
               scanner.setRange(new Range(new Text(Long.toHexString(trace))));
               final StringBuilder finalSB = sb;
@@ -92,9 +93,10 @@ public class TraceCommand extends DebugCommand {
         } else {
           shellState.getReader().println("Not tracing");
         }
-      } else
+      } else {
         throw new BadArgumentException("Argument must be 'on' or 'off'", fullCommand,
             fullCommand.indexOf(cl.getArgs()[0]));
+      }
     } else if (cl.getArgs().length == 0) {
       shellState.getReader().println(Trace.isTracing() ? "on" : "off");
     } else {
@@ -108,6 +110,17 @@ public class TraceCommand extends DebugCommand {
 
   @Override
   public String description() {
-    return "turns trace logging on or off";
+    return "turns tracing on or off";
   }
+
+  @Override
+  public String usage() {
+    return getName() + " [ on | off ]";
+  }
+
+  @Override
+  public int numArgs() {
+    return Shell.NO_FIXED_ARG_LENGTH_CHECK;
+  }
+
 }

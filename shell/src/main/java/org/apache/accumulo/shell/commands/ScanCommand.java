@@ -60,11 +60,11 @@ public class ScanCommand extends Command {
       formatterOpt, interpreterOpt, formatterInterpeterOpt, outputFileOpt;
 
   protected Option timestampOpt;
+  protected Option profileOpt;
   private Option optStartRowExclusive;
   private Option optStartRowInclusive;
   private Option optEndRowExclusive;
   private Option timeoutOption;
-  private Option profileOpt;
   private Option sampleOpt;
   private Option contextOpt;
   private Option executionHintsOpt;
@@ -73,13 +73,13 @@ public class ScanCommand extends Command {
       ScannerBase scanner)
       throws TableNotFoundException, AccumuloException, AccumuloSecurityException {
     if (getUseSample(cl)) {
-      SamplerConfiguration samplerConfig = shellState.getAccumuloClient().tableOperations()
-          .getSamplerConfiguration(tableName);
+      SamplerConfiguration samplerConfig =
+          shellState.getAccumuloClient().tableOperations().getSamplerConfiguration(tableName);
       if (samplerConfig == null) {
         throw new SampleNotPresentException(
             "Table " + tableName + " does not have sampling configured");
       }
-      Shell.log.debug("Using sampling configuration : " + samplerConfig);
+      Shell.log.debug("Using sampling configuration : {}", samplerConfig);
       scanner.setSamplerConfiguration(samplerConfig);
     }
   }
@@ -130,9 +130,9 @@ public class ScanCommand extends Command {
           final int length = Integer.parseInt(showLength);
           config.setShownLength(length);
         } catch (NumberFormatException nfe) {
-          shellState.getReader().println("Arg must be an integer.");
+          Shell.log.error("Arg must be an integer.", nfe);
         } catch (IllegalArgumentException iae) {
-          shellState.getReader().println("Arg must be greater than one.");
+          Shell.log.error("Arg must be greater than one.", iae);
         }
       }
       printRecords(cl, shellState, config, scanner, formatter, printFile);
@@ -164,7 +164,7 @@ public class ScanCommand extends Command {
     }
   }
 
-  protected void addScanIterators(final Shell shellState, CommandLine cl, final Scanner scanner,
+  protected void addScanIterators(final Shell shellState, CommandLine cl, final ScannerBase scanner,
       final String tableName) throws Exception {
 
     List<IteratorSetting> tableScanIterators;
@@ -187,14 +187,14 @@ public class ScanCommand extends Command {
       }
     }
 
-    Shell.log.debug("Found " + tableScanIterators.size() + " scan iterators to set");
+    Shell.log.debug("Found {} scan iterators to set", tableScanIterators.size());
 
     for (IteratorSetting setting : tableScanIterators) {
-      Shell.log.debug("Setting scan iterator " + setting.getName() + " at priority "
-          + setting.getPriority() + " using class name " + setting.getIteratorClass());
+      Shell.log.debug("Setting scan iterator {} at priority {} using class name {}",
+          setting.getName(), setting.getPriority(), setting.getIteratorClass());
       for (Entry<String,String> option : setting.getOptions().entrySet()) {
-        Shell.log.debug("Setting option for " + setting.getName() + ": " + option.getKey() + "="
-            + option.getValue());
+        Shell.log.debug("Setting option for {}: {}={}", setting.getName(), option.getKey(),
+            option.getValue());
       }
       scanner.addScanIterator(setting);
     }
@@ -218,14 +218,20 @@ public class ScanCommand extends Command {
     Class<? extends ScanInterpreter> clazz = null;
     try {
       if (cl.hasOption(interpreterOpt.getOpt())) {
+        Shell.log
+            .warn("Scan Interpreter option is deprecated and will be removed in a future version.");
+
         clazz = AccumuloVFSClassLoader.loadClass(cl.getOptionValue(interpreterOpt.getOpt()),
             ScanInterpreter.class);
       } else if (cl.hasOption(formatterInterpeterOpt.getOpt())) {
+        Shell.log
+            .warn("Scan Interpreter option is deprecated and will be removed in a future version.");
+
         clazz = AccumuloVFSClassLoader.loadClass(cl.getOptionValue(formatterInterpeterOpt.getOpt()),
             ScanInterpreter.class);
       }
     } catch (ClassNotFoundException e) {
-      shellState.getReader().println("Interpreter class could not be loaded.\n" + e.getMessage());
+      Shell.log.error("Interpreter class could not be loaded.", e);
     }
 
     if (clazz == null)
@@ -242,15 +248,19 @@ public class ScanCommand extends Command {
 
     try {
       if (cl.hasOption(formatterOpt.getOpt())) {
+        Shell.log.warn("Formatter option is deprecated and will be removed in a future version.");
+
         return shellState.getClassLoader(cl, shellState)
             .loadClass(cl.getOptionValue(formatterOpt.getOpt())).asSubclass(Formatter.class);
       } else if (cl.hasOption(formatterInterpeterOpt.getOpt())) {
+        Shell.log.warn("Formatter option is deprecated and will be removed in a future version.");
+
         return shellState.getClassLoader(cl, shellState)
             .loadClass(cl.getOptionValue(formatterInterpeterOpt.getOpt()))
             .asSubclass(Formatter.class);
       }
     } catch (Exception e) {
-      shellState.getReader().println("Formatter class could not be loaded.\n" + e.getMessage());
+      Shell.log.error("Formatter class could not be loaded.", e);
     }
 
     return shellState.getFormatter(tableName);
@@ -280,7 +290,7 @@ public class ScanCommand extends Command {
       // did not see a way to make commons cli do this check... it has mutually exclusive options
       // but does not support the or
       throw new IllegalArgumentException("Options -" + scanOptRow.getOpt() + " AND (-"
-          + OptUtil.START_ROW_OPT + " OR -" + OptUtil.END_ROW_OPT + ") are mutally exclusive ");
+          + OptUtil.START_ROW_OPT + " OR -" + OptUtil.END_ROW_OPT + ") are mutually exclusive ");
     }
 
     if (cl.hasOption(scanOptRow.getOpt())) {
@@ -302,8 +312,8 @@ public class ScanCommand extends Command {
   protected Authorizations getAuths(final CommandLine cl, final Shell shellState)
       throws AccumuloSecurityException, AccumuloException {
     final String user = shellState.getAccumuloClient().whoami();
-    Authorizations auths = shellState.getAccumuloClient().securityOperations()
-        .getUserAuthorizations(user);
+    Authorizations auths =
+        shellState.getAccumuloClient().securityOperations().getUserAuthorizations(user);
     if (cl.hasOption(scanOptAuths.getOpt())) {
       auths = ScanCommand.parseAuthorizations(cl.getOptionValue(scanOptAuths.getOpt()));
     }
@@ -339,8 +349,8 @@ public class ScanCommand extends Command {
     timestampOpt = new Option("st", "show-timestamps", false, "display timestamps");
     disablePaginationOpt = new Option("np", "no-pagination", false, "disable pagination of output");
     showFewOpt = new Option("f", "show-few", true, "show only a specified number of characters");
-    formatterOpt = new Option("fm", "formatter", true,
-        "fully qualified name of the formatter class to use");
+    formatterOpt =
+        new Option("fm", "formatter", true, "fully qualified name of the formatter class to use");
     interpreterOpt = new Option("i", "interpreter", true,
         "fully qualified name of the interpreter class to use");
     formatterInterpeterOpt = new Option("fi", "fmt-interpreter", true,
@@ -370,8 +380,8 @@ public class ScanCommand extends Command {
 
     o.addOption(scanOptAuths);
     o.addOption(scanOptRow);
-    optStartRowInclusive = new Option(OptUtil.START_ROW_OPT, "begin-row", true,
-        "begin row (inclusive)");
+    optStartRowInclusive =
+        new Option(OptUtil.START_ROW_OPT, "begin-row", true, "begin row (inclusive)");
     optStartRowInclusive.setArgName("begin-row");
     o.addOption(optStartRowInclusive);
     o.addOption(OptUtil.endRowOpt());

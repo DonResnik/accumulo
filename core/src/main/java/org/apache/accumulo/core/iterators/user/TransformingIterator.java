@@ -47,8 +47,7 @@ import org.apache.accumulo.core.security.VisibilityEvaluator;
 import org.apache.accumulo.core.security.VisibilityParseException;
 import org.apache.accumulo.core.util.BadArgumentException;
 import org.apache.accumulo.core.util.Pair;
-import org.apache.commons.collections.BufferOverflowException;
-import org.apache.commons.collections.map.LRUMap;
+import org.apache.commons.collections4.map.LRUMap;
 import org.apache.hadoop.io.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -105,8 +104,8 @@ public abstract class TransformingIterator extends WrappingIterator implements O
   protected boolean seekColumnFamiliesInclusive;
 
   private VisibilityEvaluator ve = null;
-  private LRUMap visibleCache = null;
-  private LRUMap parsedVisibilitiesCache = null;
+  private LRUMap<ByteSequence,Boolean> visibleCache = null;
+  private LRUMap<ByteSequence,Boolean> parsedVisibilitiesCache = null;
   private long maxBufferSize;
 
   private static Comparator<Pair<Key,Value>> keyComparator = Comparator.comparing(Pair::getFirst);
@@ -120,18 +119,18 @@ public abstract class TransformingIterator extends WrappingIterator implements O
       String auths = options.get(AUTH_OPT);
       if (auths != null && !auths.isEmpty()) {
         ve = new VisibilityEvaluator(new Authorizations(auths.getBytes(UTF_8)));
-        visibleCache = new LRUMap(100);
+        visibleCache = new LRUMap<>(100);
       }
     }
 
     if (options.containsKey(MAX_BUFFER_SIZE_OPT)) {
-      maxBufferSize = ConfigurationTypeHelper
-          .getFixedMemoryAsBytes(options.get(MAX_BUFFER_SIZE_OPT));
+      maxBufferSize =
+          ConfigurationTypeHelper.getFixedMemoryAsBytes(options.get(MAX_BUFFER_SIZE_OPT));
     } else {
       maxBufferSize = DEFAULT_MAX_BUFFER_SIZE;
     }
 
-    parsedVisibilitiesCache = new LRUMap(100);
+    parsedVisibilitiesCache = new LRUMap<>(100);
   }
 
   @Override
@@ -187,18 +186,18 @@ public abstract class TransformingIterator extends WrappingIterator implements O
     copy.keyPos = keyPos;
     copy.keys.addAll(keys);
     copy.seekRange = (seekRange == null) ? null : new Range(seekRange);
-    copy.seekColumnFamilies = (seekColumnFamilies == null) ? null
-        : new HashSet<>(seekColumnFamilies);
+    copy.seekColumnFamilies =
+        (seekColumnFamilies == null) ? null : new HashSet<>(seekColumnFamilies);
     copy.seekColumnFamiliesInclusive = seekColumnFamiliesInclusive;
 
     copy.ve = ve;
     if (visibleCache != null) {
-      copy.visibleCache = new LRUMap(visibleCache.maxSize());
+      copy.visibleCache = new LRUMap<>(visibleCache.maxSize());
       copy.visibleCache.putAll(visibleCache);
     }
 
     if (parsedVisibilitiesCache != null) {
-      copy.parsedVisibilitiesCache = new LRUMap(parsedVisibilitiesCache.maxSize());
+      copy.parsedVisibilitiesCache = new LRUMap<>(parsedVisibilitiesCache.maxSize());
       copy.parsedVisibilitiesCache.putAll(parsedVisibilitiesCache);
     }
 
@@ -347,7 +346,7 @@ public abstract class TransformingIterator extends WrappingIterator implements O
 
           // try to defend against a scan or compaction using all memory in a tablet server
           if (appened > maxBufferSize)
-            throw new BufferOverflowException(
+            throw new IllegalArgumentException(
                 "Exceeded buffer size of " + maxBufferSize + ", prefixKey: " + prefixKey);
 
           if (getSource().hasTop() && key == getSource().getTopKey())
@@ -407,7 +406,7 @@ public abstract class TransformingIterator extends WrappingIterator implements O
     // check, even if visibility is not evaluated.
     ByteSequence visibility = key.getColumnVisibilityData();
     ColumnVisibility colVis = null;
-    Boolean parsed = (Boolean) parsedVisibilitiesCache.get(visibility);
+    Boolean parsed = parsedVisibilitiesCache.get(visibility);
     if (parsed == null) {
       try {
         colVis = new ColumnVisibility(visibility.toArray());
@@ -433,7 +432,7 @@ public abstract class TransformingIterator extends WrappingIterator implements O
     if (!scanning || !visible || ve == null || visibleCache == null || visibility.length() == 0)
       return visible;
 
-    visible = (Boolean) visibleCache.get(visibility);
+    visible = visibleCache.get(visibility);
     if (visible == null) {
       try {
         if (colVis == null)
@@ -662,8 +661,8 @@ public abstract class TransformingIterator extends WrappingIterator implements O
    *          the column families that have been fetched at seek time
    * @return the untransformed column families that would transform info {@code columnFamilies}
    */
-  protected Collection<ByteSequence> untransformColumnFamilies(
-      Collection<ByteSequence> columnFamilies) {
+  protected Collection<ByteSequence>
+      untransformColumnFamilies(Collection<ByteSequence> columnFamilies) {
     return columnFamilies;
   }
 

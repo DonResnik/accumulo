@@ -55,7 +55,7 @@ public class ZooUtil {
 
   public static final RetryFactory DEFAULT_RETRY = Retry.builder().maxRetries(10)
       .retryAfter(250, MILLISECONDS).incrementBy(250, MILLISECONDS).maxWait(5, TimeUnit.SECONDS)
-      .logInterval(3, TimeUnit.MINUTES).createFactory();
+      .backOffFactor(1.5).logInterval(3, TimeUnit.MINUTES).createFactory();
 
   private static final Logger log = LoggerFactory.getLogger(ZooUtil.class);
 

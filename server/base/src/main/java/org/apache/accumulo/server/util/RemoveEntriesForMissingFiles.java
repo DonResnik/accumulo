@@ -44,7 +44,7 @@ import org.apache.accumulo.core.security.Authorizations;
 import org.apache.accumulo.server.ServerContext;
 import org.apache.accumulo.server.cli.ServerUtilOpts;
 import org.apache.accumulo.server.fs.VolumeManager;
-import org.apache.commons.collections.map.LRUMap;
+import org.apache.commons.collections4.map.LRUMap;
 import org.apache.hadoop.fs.Path;
 import org.apache.htrace.TraceScope;
 
@@ -179,8 +179,8 @@ public class RemoveEntriesForMissingFiles {
   }
 
   static int checkAllTables(ServerContext context, boolean fix) throws Exception {
-    int missing = checkTable(context, RootTable.NAME, MetadataSchema.TabletsSection.getRange(),
-        fix);
+    int missing =
+        checkTable(context, RootTable.NAME, MetadataSchema.TabletsSection.getRange(), fix);
 
     if (missing == 0)
       return checkTable(context, MetadataTable.NAME, MetadataSchema.TabletsSection.getRange(), fix);
@@ -202,8 +202,8 @@ public class RemoveEntriesForMissingFiles {
 
   public static void main(String[] args) throws Exception {
     Opts opts = new Opts();
-    try (TraceScope clientSpan = opts
-        .parseArgsAndTrace(RemoveEntriesForMissingFiles.class.getName(), args)) {
+    try (TraceScope clientSpan =
+        opts.parseArgsAndTrace(RemoveEntriesForMissingFiles.class.getName(), args)) {
       checkAllTables(opts.getServerContext(), opts.fix);
     }
   }

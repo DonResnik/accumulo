@@ -34,9 +34,10 @@ import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -46,8 +47,6 @@ import org.apache.accumulo.core.Constants;
 import org.apache.accumulo.core.client.AccumuloClient;
 import org.apache.accumulo.core.client.Scanner;
 import org.apache.accumulo.core.client.TableNotFoundException;
-import org.apache.accumulo.core.clientImpl.Namespace;
-import org.apache.accumulo.core.clientImpl.Namespaces;
 import org.apache.accumulo.core.clientImpl.Tables;
 import org.apache.accumulo.core.clientImpl.ThriftTransportPool;
 import org.apache.accumulo.core.clientImpl.thrift.TableOperation;
@@ -56,7 +55,6 @@ import org.apache.accumulo.core.clientImpl.thrift.ThriftTableOperationException;
 import org.apache.accumulo.core.conf.AccumuloConfiguration;
 import org.apache.accumulo.core.conf.Property;
 import org.apache.accumulo.core.data.Key;
-import org.apache.accumulo.core.data.NamespaceId;
 import org.apache.accumulo.core.data.TableId;
 import org.apache.accumulo.core.data.Value;
 import org.apache.accumulo.core.dataImpl.KeyExtent;
@@ -72,18 +70,13 @@ import org.apache.accumulo.core.master.thrift.TabletServerStatus;
 import org.apache.accumulo.core.metadata.MetadataTable;
 import org.apache.accumulo.core.metadata.RootTable;
 import org.apache.accumulo.core.metadata.schema.MetadataSchema.TabletsSection;
-import org.apache.accumulo.core.replication.ReplicationTable;
 import org.apache.accumulo.core.replication.thrift.ReplicationCoordinator;
 import org.apache.accumulo.core.security.Authorizations;
-import org.apache.accumulo.core.security.NamespacePermission;
-import org.apache.accumulo.core.security.TablePermission;
 import org.apache.accumulo.core.tabletserver.thrift.TUnloadTabletGoal;
 import org.apache.accumulo.core.trace.TraceUtil;
 import org.apache.accumulo.core.util.Daemon;
-import org.apache.accumulo.core.util.Pair;
 import org.apache.accumulo.fate.AgeOffStore;
 import org.apache.accumulo.fate.Fate;
-import org.apache.accumulo.fate.zookeeper.IZooReaderWriter;
 import org.apache.accumulo.fate.zookeeper.ZooLock;
 import org.apache.accumulo.fate.zookeeper.ZooLock.LockLossReason;
 import org.apache.accumulo.fate.zookeeper.ZooReaderWriter;
@@ -96,17 +89,13 @@ import org.apache.accumulo.master.replication.MasterReplicationCoordinator;
 import org.apache.accumulo.master.replication.ReplicationDriver;
 import org.apache.accumulo.master.replication.WorkDriver;
 import org.apache.accumulo.master.state.TableCounts;
+import org.apache.accumulo.master.upgrade.UpgradeCoordinator;
+import org.apache.accumulo.server.AbstractServer;
 import org.apache.accumulo.server.HighlyAvailableService;
-import org.apache.accumulo.server.ServerConstants;
 import org.apache.accumulo.server.ServerContext;
 import org.apache.accumulo.server.ServerOpts;
-import org.apache.accumulo.server.ServerUtil;
 import org.apache.accumulo.server.conf.ServerConfigurationFactory;
-import org.apache.accumulo.server.fs.VolumeChooserEnvironment;
-import org.apache.accumulo.server.fs.VolumeChooserEnvironmentImpl;
 import org.apache.accumulo.server.fs.VolumeManager;
-import org.apache.accumulo.server.fs.VolumeManager.FileType;
-import org.apache.accumulo.server.init.Initialize;
 import org.apache.accumulo.server.log.WalStateManager;
 import org.apache.accumulo.server.log.WalStateManager.WalMarkerException;
 import org.apache.accumulo.server.master.LiveTServerSet;
@@ -137,12 +126,10 @@ import org.apache.accumulo.server.security.SecurityOperation;
 import org.apache.accumulo.server.security.delegation.AuthenticationTokenKeyManager;
 import org.apache.accumulo.server.security.delegation.AuthenticationTokenSecretManager;
 import org.apache.accumulo.server.security.delegation.ZooAuthenticationKeyDistributor;
-import org.apache.accumulo.server.security.handler.ZKPermHandler;
 import org.apache.accumulo.server.tables.TableManager;
 import org.apache.accumulo.server.tables.TableObserver;
 import org.apache.accumulo.server.util.DefaultMap;
 import org.apache.accumulo.server.util.Halt;
-import org.apache.accumulo.server.util.MetadataTableUtil;
 import org.apache.accumulo.server.util.ServerBulkImportStatus;
 import org.apache.accumulo.server.util.TableInfoUtil;
 import org.apache.accumulo.server.util.time.SimpleTimer;
@@ -166,7 +153,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.collect.ImmutableSortedMap;
-import com.google.common.collect.Iterables;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
@@ -175,7 +161,7 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
  * <p>
  * The master will also coordinate log recoveries and reports general status.
  */
-public class Master
+public class Master extends AbstractServer
     implements LiveTServerSet.Listener, TableObserver, CurrentState, HighlyAvailableService {
 
   static final Logger log = LoggerFactory.getLogger(Master.class);
@@ -191,16 +177,15 @@ public class Master
   private static final int MAX_BAD_STATUS_COUNT = 3;
 
   final VolumeManager fs;
-  private final String hostname;
   private final Object balancedNotifier = new Object();
   final LiveTServerSet tserverSet;
   private final List<TabletGroupWatcher> watchers = new ArrayList<>();
   final SecurityOperation security;
-  final Map<TServerInstance,AtomicInteger> badServers = Collections
-      .synchronizedMap(new DefaultMap<>(new AtomicInteger()));
+  final Map<TServerInstance,AtomicInteger> badServers =
+      Collections.synchronizedMap(new DefaultMap<>(new AtomicInteger()));
   final Set<TServerInstance> serversToShutdown = Collections.synchronizedSet(new HashSet<>());
-  final SortedMap<KeyExtent,TServerInstance> migrations = Collections
-      .synchronizedSortedMap(new TreeMap<>());
+  final SortedMap<KeyExtent,TServerInstance> migrations =
+      Collections.synchronizedSortedMap(new TreeMap<>());
   final EventCoordinator nextEvent = new EventCoordinator();
   private final Object mergeLock = new Object();
   private ReplicationDriver replicationWorkDriver;
@@ -221,8 +206,8 @@ public class Master
 
   Fate<Master> fate;
 
-  volatile SortedMap<TServerInstance,TabletServerStatus> tserverStatus = Collections
-      .unmodifiableSortedMap(new TreeMap<>());
+  volatile SortedMap<TServerInstance,TabletServerStatus> tserverStatus =
+      Collections.unmodifiableSortedMap(new TreeMap<>());
   final ServerBulkImportStatus bulkImportStatus = new ServerBulkImportStatus();
 
   private final AtomicBoolean masterInitialized = new AtomicBoolean(false);
@@ -270,305 +255,25 @@ public class Master
     }
 
     if (oldState != newState && (newState == MasterState.HAVE_LOCK)) {
-      upgradeZookeeper();
+      upgradeCoordinator.upgradeZookeeper();
     }
 
     if (oldState != newState && (newState == MasterState.NORMAL)) {
-      upgradeMetadata();
-    }
-  }
-
-  private void moveRootTabletToRootTable(IZooReaderWriter zoo) throws Exception {
-    String dirZPath = getZooKeeperRoot() + RootTable.ZROOT_TABLET_PATH;
-
-    if (!zoo.exists(dirZPath)) {
-      Path oldPath = fs.getFullPath(FileType.TABLE, "/" + MetadataTable.ID + "/root_tablet");
-      if (fs.exists(oldPath)) {
-        VolumeChooserEnvironment chooserEnv = new VolumeChooserEnvironmentImpl(RootTable.ID,
-            RootTable.EXTENT.getEndRow(), context);
-        String newPath = fs.choose(chooserEnv, ServerConstants.getBaseUris(context))
-            + Constants.HDFS_TABLES_DIR + Path.SEPARATOR + RootTable.ID;
-        fs.mkdirs(new Path(newPath));
-        if (!fs.rename(oldPath, new Path(newPath))) {
-          throw new IOException("Failed to move root tablet from " + oldPath + " to " + newPath);
-        }
-
-        log.info("Upgrade renamed {} to {}", oldPath, newPath);
-      }
-
-      Path location = null;
-
-      for (String basePath : ServerConstants.getTablesDirs(context)) {
-        Path path = new Path(basePath + "/" + RootTable.ID + RootTable.ROOT_TABLET_LOCATION);
-        if (fs.exists(path)) {
-          if (location != null) {
-            throw new IllegalStateException(
-                "Root table at multiple locations " + location + " " + path);
-          }
-
-          location = path;
-        }
-      }
-
-      if (location == null) {
-        throw new IllegalStateException("Failed to find root tablet");
-      }
-
-      log.info("Upgrade setting root table location in zookeeper {}", location);
-      zoo.putPersistentData(dirZPath, location.toString().getBytes(), NodeExistsPolicy.FAIL);
-    }
-  }
-
-  private boolean haveUpgradedZooKeeper = false;
-
-  @SuppressFBWarnings(value = "DM_EXIT",
-      justification = "TODO probably not the best to call System.exit here")
-  private void upgradeZookeeper() {
-    // 1.5.1 and 1.6.0 both do some state checking after obtaining the zoolock for the
-    // monitor and before starting up. It's not tied to the data version at all (and would
-    // introduce unnecessary complexity to try to make the master do it), but be aware
-    // that the master is not the only thing that may alter zookeeper before starting.
-
-    final int accumuloPersistentVersion = ServerUtil.getAccumuloPersistentVersion(fs);
-    if (ServerUtil.persistentVersionNeedsUpgrade(accumuloPersistentVersion)) {
-      // This Master hasn't started Fate yet, so any outstanding transactions must be from before
-      // the upgrade.
-      // Change to Guava's Verify once we use Guava 17.
       if (fate != null) {
         throw new IllegalStateException("Access to Fate should not have been"
-            + " initialized prior to the Master transitioning to active. Please"
-            + " save all logs and file a bug.");
+            + " initialized prior to the Master finishing upgrades. Please save"
+            + " all logs and file a bug.");
       }
-      ServerUtil.abortIfFateTransactions(getContext());
-      try {
-        log.info("Upgrading zookeeper");
-
-        IZooReaderWriter zoo = context.getZooReaderWriter();
-        final String zooRoot = getZooKeeperRoot();
-
-        log.debug("Handling updates for version {}", accumuloPersistentVersion);
-
-        log.debug("Cleaning out remnants of logger role.");
-        zoo.recursiveDelete(zooRoot + "/loggers", NodeMissingPolicy.SKIP);
-        zoo.recursiveDelete(zooRoot + "/dead/loggers", NodeMissingPolicy.SKIP);
-
-        final byte[] zero = {'0'};
-        log.debug("Initializing recovery area.");
-        zoo.putPersistentData(zooRoot + Constants.ZRECOVERY, zero, NodeExistsPolicy.SKIP);
-
-        for (String id : zoo.getChildren(zooRoot + Constants.ZTABLES)) {
-          log.debug("Prepping table {} for compaction cancellations.", id);
-          zoo.putPersistentData(
-              zooRoot + Constants.ZTABLES + "/" + id + Constants.ZTABLE_COMPACT_CANCEL_ID, zero,
-              NodeExistsPolicy.SKIP);
-        }
-
-        @SuppressWarnings("deprecation")
-        String zpath = zooRoot + Constants.ZCONFIG + "/" + Property.TSERV_WAL_SYNC_METHOD.getKey();
-        // is the entire instance set to use flushing vs sync?
-        boolean flushDefault = false;
-        try {
-          byte[] data = zoo.getData(zpath, null);
-          if (new String(data, UTF_8).endsWith("flush")) {
-            flushDefault = true;
-          }
-        } catch (KeeperException.NoNodeException ex) {
-          // skip
-        }
-        for (String id : zoo.getChildren(zooRoot + Constants.ZTABLES)) {
-          log.debug("Converting table {} WALog setting to Durability", id);
-          try {
-            @SuppressWarnings("deprecation")
-            String path = zooRoot + Constants.ZTABLES + "/" + id + Constants.ZTABLE_CONF + "/"
-                + Property.TABLE_WALOG_ENABLED.getKey();
-            byte[] data = zoo.getData(path, null);
-            boolean useWAL = Boolean.parseBoolean(new String(data, UTF_8));
-            zoo.recursiveDelete(path, NodeMissingPolicy.FAIL);
-            path = zooRoot + Constants.ZTABLES + "/" + id + Constants.ZTABLE_CONF + "/"
-                + Property.TABLE_DURABILITY.getKey();
-            if (useWAL) {
-              if (flushDefault) {
-                zoo.putPersistentData(path, "flush".getBytes(), NodeExistsPolicy.SKIP);
-              } else {
-                zoo.putPersistentData(path, "sync".getBytes(), NodeExistsPolicy.SKIP);
-              }
-            } else {
-              zoo.putPersistentData(path, "none".getBytes(), NodeExistsPolicy.SKIP);
-            }
-          } catch (KeeperException.NoNodeException ex) {
-            // skip it
-          }
-        }
-
-        // create initial namespaces
-        String namespaces = getZooKeeperRoot() + Constants.ZNAMESPACES;
-        zoo.putPersistentData(namespaces, new byte[0], NodeExistsPolicy.SKIP);
-        for (Pair<String,NamespaceId> namespace : Iterables.concat(
-            Collections.singleton(new Pair<>(Namespace.ACCUMULO.name(), Namespace.ACCUMULO.id())),
-            Collections.singleton(new Pair<>(Namespace.DEFAULT.name(), Namespace.DEFAULT.id())))) {
-          String ns = namespace.getFirst();
-          NamespaceId id = namespace.getSecond();
-          log.debug("Upgrade creating namespace \"{}\" (ID: {})", ns, id);
-          if (!Namespaces.exists(context, id)) {
-            TableManager.prepareNewNamespaceState(zoo, getInstanceID(), id, ns,
-                NodeExistsPolicy.SKIP);
-          }
-        }
-
-        // create replication table in zk
-        log.debug("Upgrade creating table {} (ID: {})", ReplicationTable.NAME, ReplicationTable.ID);
-        TableManager.prepareNewTableState(zoo, getInstanceID(), ReplicationTable.ID,
-            Namespace.ACCUMULO.id(), ReplicationTable.NAME, TableState.OFFLINE,
-            NodeExistsPolicy.SKIP);
-
-        // create root table
-        log.debug("Upgrade creating table {} (ID: {})", RootTable.NAME, RootTable.ID);
-        TableManager.prepareNewTableState(zoo, getInstanceID(), RootTable.ID,
-            Namespace.ACCUMULO.id(), RootTable.NAME, TableState.ONLINE, NodeExistsPolicy.SKIP);
-        Initialize.initSystemTablesConfig(context.getZooReaderWriter(), context.getZooKeeperRoot(),
-            context.getHadoopConf());
-        // ensure root user can flush root table
-        security.grantTablePermission(context.rpcCreds(), security.getRootUsername(), RootTable.ID,
-            TablePermission.ALTER_TABLE, Namespace.ACCUMULO.id());
-
-        // put existing tables in the correct namespaces
-        String tables = getZooKeeperRoot() + Constants.ZTABLES;
-        for (String tableId : zoo.getChildren(tables)) {
-          NamespaceId targetNamespace = (MetadataTable.ID.canonical().equals(tableId)
-              || RootTable.ID.canonical().equals(tableId)) ? Namespace.ACCUMULO.id()
-                  : Namespace.DEFAULT.id();
-          log.debug("Upgrade moving table {} (ID: {}) into namespace with ID {}",
-              new String(zoo.getData(tables + "/" + tableId + Constants.ZTABLE_NAME, null), UTF_8),
-              tableId, targetNamespace);
-          zoo.putPersistentData(tables + "/" + tableId + Constants.ZTABLE_NAMESPACE,
-              targetNamespace.canonical().getBytes(UTF_8), NodeExistsPolicy.SKIP);
-        }
-
-        // rename metadata table
-        log.debug("Upgrade renaming table {} (ID: {}) to {}", MetadataTable.OLD_NAME,
-            MetadataTable.ID, MetadataTable.NAME);
-        zoo.putPersistentData(tables + "/" + MetadataTable.ID + Constants.ZTABLE_NAME,
-            Tables.qualify(MetadataTable.NAME).getSecond().getBytes(UTF_8),
-            NodeExistsPolicy.OVERWRITE);
-
-        moveRootTabletToRootTable(zoo);
-
-        // add system namespace permissions to existing users
-        // N.B. this section is ignoring the configured PermissionHandler
-        // under the assumption that these details are in zk and we can
-        // modify the structure so long as we pass back in whatever we read.
-        // This is true for any permission handler, including KerberosPermissionHandler,
-        // that uses the ZKPermHandler for permissions storage so long
-        // as the PermHandler only overrides the user name, and we don't care what the user name is.
-        ZKPermHandler perm = new ZKPermHandler();
-        perm.initialize(getContext(), true);
-        String users = getZooKeeperRoot() + "/users";
-        for (String user : zoo.getChildren(users)) {
-          zoo.putPersistentData(users + "/" + user + "/Namespaces", new byte[0],
-              NodeExistsPolicy.SKIP);
-          perm.grantNamespacePermission(user, Namespace.ACCUMULO.id().canonical(),
-              NamespacePermission.READ);
-        }
-        // because we need to refer to the root username, we can't use the
-        // ZKPermHandler directly since that violates our earlier assumption that we don't
-        // care about contents of the username. When using a PermissionHandler that needs to
-        // encode the username in some way, i.e. the KerberosPermissionHandler, things would
-        // fail. Instead we should be able to use the security object since
-        // the loop above should have made the needed structure in ZK.
-        security.grantNamespacePermission(context.rpcCreds(), security.getRootUsername(),
-            Namespace.ACCUMULO.id(), NamespacePermission.ALTER_TABLE);
-
-        // add the currlog location for root tablet current logs
-        zoo.putPersistentData(getZooKeeperRoot() + RootTable.ZROOT_TABLET_CURRENT_LOGS, new byte[0],
-            NodeExistsPolicy.SKIP);
-
-        // create tablet server wal logs node in ZK
-        zoo.putPersistentData(getZooKeeperRoot() + WalStateManager.ZWALS, new byte[0],
-            NodeExistsPolicy.SKIP);
-
-        haveUpgradedZooKeeper = true;
-      } catch (Exception ex) {
-        // ACCUMULO-3651 Changed level to error and added FATAL to message for slf4j compatibility
-        log.error("FATAL: Error performing upgrade", ex);
-        System.exit(1);
-      }
+      upgradeMetadataFuture = upgradeCoordinator.upgradeMetadata();
     }
   }
 
-  private final AtomicBoolean upgradeMetadataRunning = new AtomicBoolean(false);
-  private final CountDownLatch waitForMetadataUpgrade = new CountDownLatch(1);
+  private UpgradeCoordinator upgradeCoordinator;
+  private Future<Void> upgradeMetadataFuture;
 
-  private final ServerContext context;
   private final ServerConfigurationFactory serverConfig;
 
   private MasterClientServiceHandler clientHandler;
-
-  private void upgradeMetadata() {
-    // we make sure we're only doing the rest of this method once so that we can signal to other
-    // threads that an upgrade wasn't needed.
-    if (upgradeMetadataRunning.compareAndSet(false, true)) {
-      final int accumuloPersistentVersion = ServerUtil.getAccumuloPersistentVersion(fs);
-      if (ServerUtil.persistentVersionNeedsUpgrade(accumuloPersistentVersion)) {
-        // sanity check that we passed the Fate verification prior to ZooKeeper upgrade, and that
-        // Fate still hasn't been started.
-        // Change both to use Guava's Verify once we use Guava 17.
-        if (!haveUpgradedZooKeeper) {
-          throw new IllegalStateException("We should only attempt to upgrade"
-              + " Accumulo's metadata table if we've already upgraded ZooKeeper."
-              + " Please save all logs and file a bug.");
-        }
-        if (fate != null) {
-          throw new IllegalStateException("Access to Fate should not have been"
-              + " initialized prior to the Master finishing upgrades. Please save"
-              + " all logs and file a bug.");
-        }
-        Runnable upgradeTask = new Runnable() {
-          int version = accumuloPersistentVersion;
-
-          @SuppressFBWarnings(value = "DM_EXIT",
-              justification = "TODO probably not the best to call System.exit here")
-          @Override
-          public void run() {
-            try {
-              log.info("Starting to upgrade metadata table.");
-              if (version == ServerConstants.MOVE_DELETE_MARKERS - 1) {
-                log.info("Updating Delete Markers in metadata table for version 1.4");
-                MetadataTableUtil.moveMetaDeleteMarkersFrom14(context);
-                version++;
-              }
-              if (version == ServerConstants.MOVE_TO_ROOT_TABLE - 1) {
-                log.info("Updating Delete Markers in metadata table.");
-                MetadataTableUtil.moveMetaDeleteMarkers(context);
-                version++;
-              }
-              if (version == ServerConstants.MOVE_TO_REPLICATION_TABLE - 1) {
-                log.info("Updating metadata table with entries for the replication table");
-                MetadataTableUtil.createReplicationTable(context);
-                version++;
-              }
-              log.info("Updating persistent data version.");
-              ServerUtil.updateAccumuloVersion(fs, accumuloPersistentVersion);
-              log.info("Upgrade complete");
-              waitForMetadataUpgrade.countDown();
-            } catch (Exception ex) {
-              // ACCUMULO-3651 Changed level to error and added FATAL to message for slf4j
-              // compatibility
-              log.error("FATAL: Error performing upgrade", ex);
-              System.exit(1);
-            }
-
-          }
-        };
-
-        // need to run this in a separate thread because a lock is held that prevents metadata
-        // tablets from being assigned and this task writes to the
-        // metadata table
-        new Thread(upgradeTask).start();
-      } else {
-        waitForMetadataUpgrade.countDown();
-      }
-    }
-  }
 
   private int assignedOrHosted(TableId tableId) {
     int result = 0;
@@ -611,7 +316,7 @@ public class Master
       case NORMAL:
         // Count offline tablets for online tables
         for (TabletGroupWatcher watcher : watchers) {
-          TableManager manager = context.getTableManager();
+          TableManager manager = getContext().getTableManager();
           for (Entry<TableId,TableCounts> entry : watcher.getStats().entrySet()) {
             TableId tableId = entry.getKey();
             TableCounts counts = entry.getValue();
@@ -644,6 +349,7 @@ public class Master
   }
 
   public void mustBeOnline(final TableId tableId) throws ThriftTableOperationException {
+    ServerContext context = getContext();
     Tables.clearCache(context);
     if (!Tables.getTableState(context, tableId).equals(TableState.ONLINE)) {
       throw new ThriftTableOperationException(tableId.canonical(), null, TableOperation.MERGE,
@@ -651,19 +357,21 @@ public class Master
     }
   }
 
-  public ServerContext getContext() {
-    return context;
-  }
-
   public TableManager getTableManager() {
-    return context.getTableManager();
+    return getContext().getTableManager();
   }
 
-  public Master(ServerContext context) throws IOException {
-    this.context = context;
+  public static void main(String[] args) throws Exception {
+    try (Master master = new Master(new ServerOpts(), args)) {
+      master.runServer();
+    }
+  }
+
+  Master(ServerOpts opts, String[] args) throws IOException {
+    super("master", opts, args);
+    ServerContext context = super.getContext();
     this.serverConfig = context.getServerConfFactory();
     this.fs = context.getVolumeManager();
-    this.hostname = context.getHostname();
 
     AccumuloConfiguration aconf = serverConfig.getSystemConfiguration();
 
@@ -677,18 +385,14 @@ public class Master
         Property.MASTER_TABLET_BALANCER, TabletBalancer.class, new DefaultLoadBalancer());
     this.tabletBalancer.init(context);
 
-    try {
-      AccumuloVFSClassLoader.getContextManager()
-          .setContextConfig(new ContextManager.DefaultContextsConfig() {
-            @Override
-            public Map<String,String> getVfsContextClasspathProperties() {
-              return getConfiguration()
-                  .getAllPropertiesWithPrefix(Property.VFS_CONTEXT_CLASSPATH_PROPERTY);
-            }
-          });
-    } catch (IOException e) {
-      throw new RuntimeException(e);
-    }
+    AccumuloVFSClassLoader.getContextManager()
+        .setContextConfig(new ContextManager.DefaultContextsConfig() {
+          @Override
+          public Map<String,String> getVfsContextClasspathProperties() {
+            return getConfiguration()
+                .getAllPropertiesWithPrefix(Property.VFS_CONTEXT_CLASSPATH_PROPERTY);
+          }
+        });
 
     this.security = AuditedSecurityOperation.getInstance(context);
 
@@ -702,8 +406,8 @@ public class Master
       // SASL is enabled, create the key distributor (ZooKeeper) and manager (generates/rolls secret
       // keys)
       log.info("SASL is enabled, creating delegation token key manager and distributor");
-      final long tokenUpdateInterval = aconf
-          .getTimeInMillis(Property.GENERAL_DELEGATION_TOKEN_UPDATE_INTERVAL);
+      final long tokenUpdateInterval =
+          aconf.getTimeInMillis(Property.GENERAL_DELEGATION_TOKEN_UPDATE_INTERVAL);
       keyDistributor = new ZooAuthenticationKeyDistributor(context.getZooReaderWriter(),
           getZooKeeperRoot() + Constants.ZDELEGATION_TOKEN_KEYS);
       authenticationTokenKeyManager = new AuthenticationTokenKeyManager(context.getSecretManager(),
@@ -714,18 +418,15 @@ public class Master
       delegationTokensAvailable = false;
     }
 
+    upgradeCoordinator = new UpgradeCoordinator(context);
   }
 
   public String getInstanceID() {
-    return context.getInstanceID();
+    return getContext().getInstanceID();
   }
 
   public String getZooKeeperRoot() {
-    return context.getZooKeeperRoot();
-  }
-
-  public AccumuloConfiguration getConfiguration() {
-    return context.getConfiguration();
+    return getContext().getZooKeeperRoot();
   }
 
   public TServerConnection getConnection(TServerInstance server) {
@@ -733,6 +434,7 @@ public class Master
   }
 
   public MergeInfo getMergeInfo(TableId tableId) {
+    ServerContext context = getContext();
     synchronized (mergeLock) {
       try {
         String path = getZooKeeperRoot() + Constants.ZTABLES + "/" + tableId + "/merge";
@@ -757,9 +459,10 @@ public class Master
 
   public void setMergeState(MergeInfo info, MergeState state)
       throws KeeperException, InterruptedException {
+    ServerContext context = getContext();
     synchronized (mergeLock) {
-      String path = getZooKeeperRoot() + Constants.ZTABLES + "/" + info.getExtent().getTableId()
-          + "/merge";
+      String path =
+          getZooKeeperRoot() + Constants.ZTABLES + "/" + info.getExtent().getTableId() + "/merge";
       info.setState(state);
       if (state.equals(MergeState.NONE)) {
         context.getZooReaderWriter().recursiveDelete(path, NodeMissingPolicy.SKIP);
@@ -782,7 +485,7 @@ public class Master
   public void clearMergeState(TableId tableId) throws KeeperException, InterruptedException {
     synchronized (mergeLock) {
       String path = getZooKeeperRoot() + Constants.ZTABLES + "/" + tableId + "/merge";
-      context.getZooReaderWriter().recursiveDelete(path, NodeMissingPolicy.SKIP);
+      getContext().getZooReaderWriter().recursiveDelete(path, NodeMissingPolicy.SKIP);
       mergeLock.notifyAll();
     }
     nextEvent.event("Merge state of %s cleared", tableId);
@@ -790,7 +493,7 @@ public class Master
 
   void setMasterGoalState(MasterGoalState state) {
     try {
-      context.getZooReaderWriter().putPersistentData(
+      getContext().getZooReaderWriter().putPersistentData(
           getZooKeeperRoot() + Constants.ZMASTER_GOAL_STATE, state.name().getBytes(),
           NodeExistsPolicy.OVERWRITE);
     } catch (Exception ex) {
@@ -801,7 +504,7 @@ public class Master
   MasterGoalState getMasterGoalState() {
     while (true) {
       try {
-        byte[] data = context.getZooReaderWriter()
+        byte[] data = getContext().getZooReaderWriter()
             .getData(getZooKeeperRoot() + Constants.ZMASTER_GOAL_STATE, null);
         return MasterGoalState.valueOf(new String(data));
       } catch (Exception e) {
@@ -871,7 +574,7 @@ public class Master
   }
 
   TabletGoalState getTableGoalState(KeyExtent extent) {
-    TableState tableState = context.getTableManager().getTableState(extent.getTableId());
+    TableState tableState = getContext().getTableManager().getTableState(extent.getTableId());
     if (tableState == null) {
       return TabletGoalState.DELETED;
     }
@@ -946,7 +649,7 @@ public class Master
         if (!migrations.isEmpty()) {
           try {
             cleanupOfflineMigrations();
-            cleanupNonexistentMigrations(context);
+            cleanupNonexistentMigrations(getContext());
           } catch (Exception ex) {
             log.error("Error cleaning up migrations", ex);
           }
@@ -979,6 +682,7 @@ public class Master
      * tablet server will load the tablet. check for offline tables and remove their migrations.
      */
     private void cleanupOfflineMigrations() {
+      ServerContext context = getContext();
       TableManager manager = context.getTableManager();
       for (TableId tableId : Tables.getIdToNameMap(context).keySet()) {
         TableState state = manager.getTableState(tableId);
@@ -1185,12 +889,12 @@ public class Master
 
   }
 
-  private SortedMap<TServerInstance,TabletServerStatus> gatherTableInformation(
-      Set<TServerInstance> currentServers) {
+  private SortedMap<TServerInstance,TabletServerStatus>
+      gatherTableInformation(Set<TServerInstance> currentServers) {
     final long rpcTimeout = getConfiguration().getTimeInMillis(Property.GENERAL_RPC_TIMEOUT);
     int threads = getConfiguration().getCount(Property.MASTER_STATUS_THREAD_POOL_SIZE);
-    ExecutorService tp = threads == 0 ? Executors.newCachedThreadPool()
-        : Executors.newFixedThreadPool(threads);
+    ExecutorService tp =
+        threads == 0 ? Executors.newCachedThreadPool() : Executors.newFixedThreadPool(threads);
     long start = System.currentTimeMillis();
     final SortedMap<TServerInstance,TabletServerStatus> result = new ConcurrentSkipListMap<>();
     for (TServerInstance serverInstance : currentServers) {
@@ -1258,7 +962,9 @@ public class Master
     return info;
   }
 
-  public void run() throws IOException, InterruptedException, KeeperException {
+  @Override
+  public void run() {
+    final ServerContext context = getContext();
     final String zroot = getZooKeeperRoot();
 
     // ACCUMULO-4424 Put up the Thrift servers before getting the lock as a sign of process health
@@ -1277,14 +983,23 @@ public class Master
     } else {
       processor = new Processor<>(rpcProxy);
     }
-    ServerAddress sa = TServerUtils.startServer(context, hostname, Property.MASTER_CLIENTPORT,
-        processor, "Master", "Master Client Service Handler", null, Property.MASTER_MINTHREADS,
-        Property.MASTER_THREADCHECK, Property.GENERAL_MAX_MESSAGE_SIZE);
+    ServerAddress sa;
+    try {
+      sa = TServerUtils.startServer(context, getHostname(), Property.MASTER_CLIENTPORT, processor,
+          "Master", "Master Client Service Handler", null, Property.MASTER_MINTHREADS,
+          Property.MASTER_THREADCHECK, Property.GENERAL_MAX_MESSAGE_SIZE);
+    } catch (UnknownHostException e) {
+      throw new IllegalStateException("Unable to start server on host " + getHostname(), e);
+    }
     clientService = sa.server;
     log.info("Started Master client service at {}", sa.address);
 
     // block until we can obtain the ZK lock for the master
-    getMasterLock(zroot + Constants.ZMASTER_LOCK);
+    try {
+      getMasterLock(zroot + Constants.ZMASTER_LOCK);
+    } catch (KeeperException | InterruptedException e) {
+      throw new IllegalStateException("Exception getting master lock", e);
+    }
 
     recoveryManager = new RecoveryManager(this);
 
@@ -1300,18 +1015,22 @@ public class Master
 
     ZooReaderWriter zReaderWriter = context.getZooReaderWriter();
 
-    zReaderWriter.getChildren(zroot + Constants.ZRECOVERY, new Watcher() {
-      @Override
-      public void process(WatchedEvent event) {
-        nextEvent.event("Noticed recovery changes %s", event.getType());
-        try {
-          // watcher only fires once, add it back
-          zReaderWriter.getChildren(zroot + Constants.ZRECOVERY, this);
-        } catch (Exception e) {
-          log.error("Failed to add log recovery watcher back", e);
+    try {
+      zReaderWriter.getChildren(zroot + Constants.ZRECOVERY, new Watcher() {
+        @Override
+        public void process(WatchedEvent event) {
+          nextEvent.event("Noticed recovery changes %s", event.getType());
+          try {
+            // watcher only fires once, add it back
+            zReaderWriter.getChildren(zroot + Constants.ZRECOVERY, this);
+          } catch (Exception e) {
+            log.error("Failed to add log recovery watcher back", e);
+          }
         }
-      }
-    });
+      });
+    } catch (KeeperException | InterruptedException e) {
+      throw new IllegalStateException("Unable to read " + zroot + Constants.ZRECOVERY, e);
+    }
 
     watchers.add(new TabletGroupWatcher(this, new MetaDataStateStore(context, this), null) {
       @Override
@@ -1346,7 +1065,12 @@ public class Master
     }
 
     // Once we are sure the upgrade is complete, we can safely allow fate use.
-    waitForMetadataUpgrade.await();
+    try {
+      // wait for metadata upgrade running in background to complete
+      upgradeMetadataFuture.get();
+    } catch (ExecutionException | InterruptedException e) {
+      throw new IllegalStateException("Metadata upgrade failed", e);
+    }
 
     try {
       final AgeOffStore<Master> store = new AgeOffStore<>(new org.apache.accumulo.fate.ZooStore<>(
@@ -1359,16 +1083,24 @@ public class Master
 
       SimpleTimer.getInstance(getConfiguration()).schedule(() -> store.ageOff(), 63000, 63000);
     } catch (KeeperException | InterruptedException e) {
-      throw new IOException(e);
+      throw new IllegalStateException("Exception setting up FaTE cleanup thread", e);
     }
 
-    ZooKeeperInitialization.ensureZooKeeperInitialized(zReaderWriter, zroot);
+    try {
+      ZooKeeperInitialization.ensureZooKeeperInitialized(zReaderWriter, zroot);
+    } catch (KeeperException | InterruptedException e) {
+      throw new IllegalStateException("Exception while ensuring ZooKeeper is initialized", e);
+    }
 
     // Make sure that we have a secret key (either a new one or an old one from ZK) before we start
     // the master client service.
     if (authenticationTokenKeyManager != null && keyDistributor != null) {
       log.info("Starting delegation-token key manager");
-      keyDistributor.initialize();
+      try {
+        keyDistributor.initialize();
+      } catch (KeeperException | InterruptedException e) {
+        throw new IllegalStateException("Exception setting up delegation-token key manager", e);
+      }
       authenticationTokenKeyManager.start();
       boolean logged = false;
       while (!authenticationTokenKeyManager.isInitialized()) {
@@ -1385,7 +1117,11 @@ public class Master
 
     String address = sa.address.toString();
     log.info("Setting master lock data to {}", address);
-    masterLock.replaceLockData(address.getBytes());
+    try {
+      masterLock.replaceLockData(address.getBytes());
+    } catch (KeeperException | InterruptedException e) {
+      throw new IllegalStateException("Exception updating master lock", e);
+    }
 
     while (!clientService.isServing()) {
       sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
@@ -1430,40 +1166,51 @@ public class Master
     timeKeeper.shutdown();
 
     final long deadline = System.currentTimeMillis() + MAX_CLEANUP_WAIT_TIME;
-    statusThread.join(remaining(deadline));
-    if (replicationWorkAssigner != null) {
-      replicationWorkAssigner.join(remaining(deadline));
-    }
-    if (replicationWorkDriver != null) {
-      replicationWorkDriver.join(remaining(deadline));
+    try {
+      statusThread.join(remaining(deadline));
+      if (replicationWorkAssigner != null) {
+        replicationWorkAssigner.join(remaining(deadline));
+      }
+      if (replicationWorkDriver != null) {
+        replicationWorkDriver.join(remaining(deadline));
+      }
+    } catch (InterruptedException e) {
+      throw new IllegalStateException("Exception starting replication workers", e);
     }
     TServerUtils.stopTServer(replServer.get());
 
     // Signal that we want it to stop, and wait for it to do so.
     if (authenticationTokenKeyManager != null) {
       authenticationTokenKeyManager.gracefulStop();
-      authenticationTokenKeyManager.join(remaining(deadline));
+      try {
+        authenticationTokenKeyManager.join(remaining(deadline));
+      } catch (InterruptedException e) {
+        throw new IllegalStateException("Exception waiting on delegation-token key manager", e);
+      }
     }
 
     // quit, even if the tablet servers somehow jam up and the watchers
     // don't stop
     for (TabletGroupWatcher watcher : watchers) {
-      watcher.join(remaining(deadline));
+      try {
+        watcher.join(remaining(deadline));
+      } catch (InterruptedException e) {
+        throw new IllegalStateException("Exception waiting on watcher", e);
+      }
     }
     log.info("exiting");
   }
 
   private TServer setupReplication()
       throws UnknownHostException, KeeperException, InterruptedException {
+    ServerContext context = getContext();
     // Start the replication coordinator which assigns tservers to service replication requests
     MasterReplicationCoordinator impl = new MasterReplicationCoordinator(this);
-    ReplicationCoordinator.Iface haReplicationProxy = HighlyAvailableServiceWrapper.service(impl,
-        this);
-    // @formatter:off
+    ReplicationCoordinator.Iface haReplicationProxy =
+        HighlyAvailableServiceWrapper.service(impl, this);
     ReplicationCoordinator.Processor<ReplicationCoordinator.Iface> replicationCoordinatorProcessor =
-            new ReplicationCoordinator.Processor<>(TraceUtil.wrapService(haReplicationProxy));
-    // @formatter:on
-    ServerAddress replAddress = TServerUtils.startServer(context, hostname,
+        new ReplicationCoordinator.Processor<>(TraceUtil.wrapService(haReplicationProxy));
+    ServerAddress replAddress = TServerUtils.startServer(context, getHostname(),
         Property.MASTER_REPLICATION_COORDINATOR_PORT, replicationCoordinatorProcessor,
         "Master Replication Coordinator", "Replication Coordinator", null,
         Property.MASTER_REPLICATION_COORDINATOR_MINTHREADS,
@@ -1551,15 +1298,16 @@ public class Master
   }
 
   private void getMasterLock(final String zMasterLoc) throws KeeperException, InterruptedException {
+    ServerContext context = getContext();
     log.info("trying to get master lock");
 
-    final String masterClientAddress = hostname + ":"
-        + getConfiguration().getPort(Property.MASTER_CLIENTPORT)[0];
+    final String masterClientAddress =
+        getHostname() + ":" + getConfiguration().getPort(Property.MASTER_CLIENTPORT)[0];
 
     while (true) {
 
       MasterLockWatcher masterLockWatcher = new MasterLockWatcher();
-      masterLock = new ZooLock(getContext().getZooReaderWriter(), zMasterLoc);
+      masterLock = new ZooLock(context.getZooReaderWriter(), zMasterLoc);
       masterLock.lockAsync(masterLockWatcher, masterClientAddress.getBytes());
 
       masterLockWatcher.waitForChange();
@@ -1580,27 +1328,13 @@ public class Master
     setMasterState(MasterState.HAVE_LOCK);
   }
 
-  public static void main(String[] args) throws Exception {
-    final String app = "master";
-    ServerOpts opts = new ServerOpts();
-    opts.parseArgs(app, args);
-    ServerContext context = new ServerContext(opts.getSiteConfiguration());
-    context.setupServer(app, Master.class.getName(), opts.getAddress());
-    try {
-      Master master = new Master(context);
-      master.run();
-    } finally {
-      context.teardownServer();
-    }
-  }
-
   @Override
   public void update(LiveTServerSet current, Set<TServerInstance> deleted,
       Set<TServerInstance> added) {
     // if we have deleted or added tservers, then adjust our dead server list
     if (!deleted.isEmpty() || !added.isEmpty()) {
-      DeadServerList obit = new DeadServerList(context,
-          getZooKeeperRoot() + Constants.ZDEADTSERVERS);
+      DeadServerList obit =
+          new DeadServerList(getContext(), getZooKeeperRoot() + Constants.ZDEADTSERVERS);
       if (added.size() > 0) {
         log.info("New servers: {}", added);
         for (TServerInstance up : added) {
@@ -1699,6 +1433,7 @@ public class Master
       }
       return result;
     }
+    ServerContext context = getContext();
     TableManager manager = context.getTableManager();
 
     for (TableId tableId : Tables.getIdToNameMap(context).keySet()) {
@@ -1720,7 +1455,7 @@ public class Master
   @Override
   public Collection<MergeInfo> merges() {
     List<MergeInfo> result = new ArrayList<>();
-    for (TableId tableId : Tables.getIdToNameMap(context).keySet()) {
+    for (TableId tableId : Tables.getIdToNameMap(getContext()).keySet()) {
       result.add(getMergeInfo(tableId));
     }
     return result;
@@ -1801,7 +1536,8 @@ public class Master
         result.serversShuttingDown.add(server.hostPort());
       }
     }
-    DeadServerList obit = new DeadServerList(context, getZooKeeperRoot() + Constants.ZDEADTSERVERS);
+    DeadServerList obit =
+        new DeadServerList(getContext(), getZooKeeperRoot() + Constants.ZDEADTSERVERS);
     result.deadTabletServers = obit.getList();
     result.bulkImports = bulkImportStatus.getBulkLoadStatus();
     return result;
@@ -1832,7 +1568,7 @@ public class Master
 
   public void markDeadServerLogsAsClosed(Map<TServerInstance,List<Path>> logsForDeadServers)
       throws WalMarkerException {
-    WalStateManager mgr = new WalStateManager(context);
+    WalStateManager mgr = new WalStateManager(getContext());
     for (Entry<TServerInstance,List<Path>> server : logsForDeadServers.entrySet()) {
       for (Path path : server.getValue()) {
         mgr.closeWal(server.getKey(), path);

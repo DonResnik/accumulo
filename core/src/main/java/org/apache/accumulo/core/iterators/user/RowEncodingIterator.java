@@ -33,7 +33,6 @@ import org.apache.accumulo.core.data.Value;
 import org.apache.accumulo.core.iterators.IteratorEnvironment;
 import org.apache.accumulo.core.iterators.OptionDescriber;
 import org.apache.accumulo.core.iterators.SortedKeyValueIterator;
-import org.apache.commons.collections.BufferOverflowException;
 import org.apache.hadoop.io.Text;
 
 /**
@@ -118,7 +117,7 @@ public abstract class RowEncodingIterator
         values.add(new Value(sourceTopValue));
         kvBufSize += sourceTopKey.getSize() + sourceTopValue.getSize() + 128;
         if (kvBufSize > maxBufferSize) {
-          throw new BufferOverflowException(
+          throw new IllegalArgumentException(
               "Exceeded buffer size of " + maxBufferSize + " for row: " + sourceTopKey.getRow());
         }
         sourceIter.next();
@@ -165,8 +164,8 @@ public abstract class RowEncodingIterator
       IteratorEnvironment env) throws IOException {
     sourceIter = source;
     if (options.containsKey(MAX_BUFFER_SIZE_OPT)) {
-      maxBufferSize = ConfigurationTypeHelper
-          .getFixedMemoryAsBytes(options.get(MAX_BUFFER_SIZE_OPT));
+      maxBufferSize =
+          ConfigurationTypeHelper.getFixedMemoryAsBytes(options.get(MAX_BUFFER_SIZE_OPT));
     }
   }
 

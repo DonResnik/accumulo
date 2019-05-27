@@ -26,11 +26,9 @@ import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.security.PrivilegedExceptionAction;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -171,6 +169,7 @@ import org.apache.accumulo.fate.zookeeper.ZooLock.LockWatcher;
 import org.apache.accumulo.fate.zookeeper.ZooReaderWriter;
 import org.apache.accumulo.fate.zookeeper.ZooUtil;
 import org.apache.accumulo.fate.zookeeper.ZooUtil.NodeExistsPolicy;
+import org.apache.accumulo.server.AbstractServer;
 import org.apache.accumulo.server.GarbageCollectionLogger;
 import org.apache.accumulo.server.ServerContext;
 import org.apache.accumulo.server.ServerOpts;
@@ -256,12 +255,11 @@ import org.apache.accumulo.tserver.tablet.ScanBatch;
 import org.apache.accumulo.tserver.tablet.Tablet;
 import org.apache.accumulo.tserver.tablet.TabletClosedException;
 import org.apache.accumulo.tserver.tablet.TabletData;
-import org.apache.commons.collections.map.LRUMap;
+import org.apache.commons.collections4.map.LRUMap;
 import org.apache.hadoop.fs.FSError;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.htrace.Trace;
 import org.apache.htrace.TraceScope;
 import org.apache.thrift.TException;
@@ -276,7 +274,7 @@ import org.slf4j.LoggerFactory;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
 
-public class TabletServer implements Runnable {
+public class TabletServer extends AbstractServer {
 
   private static final Logger log = LoggerFactory.getLogger(TabletServer.class);
   private static final long MAX_TIME_TO_WAIT_FOR_SCAN_RESULT_MILLIS = 1000;
@@ -311,18 +309,15 @@ public class TabletServer implements Runnable {
   private final AtomicLong flushCounter = new AtomicLong(0);
   private final AtomicLong syncCounter = new AtomicLong(0);
 
-  private final ServerContext context;
   private final VolumeManager fs;
 
-  private final SortedMap<KeyExtent,Tablet> onlineTablets = Collections
-      .synchronizedSortedMap(new TreeMap<KeyExtent,Tablet>());
-  private final SortedSet<KeyExtent> unopenedTablets = Collections
-      .synchronizedSortedSet(new TreeSet<KeyExtent>());
-  private final SortedSet<KeyExtent> openingTablets = Collections
-      .synchronizedSortedSet(new TreeSet<KeyExtent>());
-  @SuppressWarnings("unchecked")
-  private final Map<KeyExtent,Long> recentlyUnloadedCache = Collections
-      .synchronizedMap(new LRUMap(1000));
+  private final OnlineTablets onlineTablets = new OnlineTablets();
+  private final SortedSet<KeyExtent> unopenedTablets =
+      Collections.synchronizedSortedSet(new TreeSet<KeyExtent>());
+  private final SortedSet<KeyExtent> openingTablets =
+      Collections.synchronizedSortedSet(new TreeSet<KeyExtent>());
+  private final Map<KeyExtent,Long> recentlyUnloadedCache =
+      Collections.synchronizedMap(new LRUMap<>(1000));
 
   private final TabletServerResourceManager resourceManager;
   private final SecurityOperation security;
@@ -353,8 +348,16 @@ public class TabletServer implements Runnable {
   private final ZooAuthenticationKeyWatcher authKeyWatcher;
   private final WalStateManager walMarker;
 
-  public TabletServer(ServerContext context) {
-    this.context = context;
+  public static void main(String[] args) throws Exception {
+    try (TabletServer tserver = new TabletServer(new ServerOpts(), args)) {
+      tserver.runServer();
+    }
+  }
+
+  TabletServer(ServerOpts opts, String[] args) {
+    super("tserver", opts, args);
+    ServerContext context = super.getContext();
+    context.setupCrypto();
     this.masterLockCache = new ZooCache(context.getZooReaderWriter(), null);
     this.watcher = new TransactionWatcher(context);
     this.confFactory = context.getServerConfFactory();
@@ -367,46 +370,46 @@ public class TabletServer implements Runnable {
     this.replWorker = new ReplicationWorker(context, fs);
     this.statsKeeper = new TabletStatsKeeper();
     SimpleTimer.getInstance(aconf).schedule(() -> {
-      synchronized (onlineTablets) {
-        long now = System.currentTimeMillis();
-        for (Tablet tablet : onlineTablets.values())
-          try {
-            tablet.updateRates(now);
-          } catch (Exception ex) {
-            log.error("Error updating rates for {}", tablet.getExtent(), ex);
-          }
+      long now = System.currentTimeMillis();
+      for (Tablet tablet : getOnlineTablets().values()) {
+        try {
+          tablet.updateRates(now);
+        } catch (Exception ex) {
+          log.error("Error updating rates for {}", tablet.getExtent(), ex);
+        }
       }
     }, 5000, 5000);
 
     final long walogMaxSize = aconf.getAsBytes(Property.TSERV_WALOG_MAX_SIZE);
     final long walogMaxAge = aconf.getTimeInMillis(Property.TSERV_WALOG_MAX_AGE);
-    final long minBlockSize = context.getHadoopConf()
-        .getLong("dfs.namenode.fs-limits.min-block-size", 0);
-    if (minBlockSize != 0 && minBlockSize > walogMaxSize)
+    final long minBlockSize =
+        context.getHadoopConf().getLong("dfs.namenode.fs-limits.min-block-size", 0);
+    if (minBlockSize != 0 && minBlockSize > walogMaxSize) {
       throw new RuntimeException("Unable to start TabletServer. Logger is set to use blocksize "
           + walogMaxSize + " but hdfs minimum block size is " + minBlockSize
           + ". Either increase the " + Property.TSERV_WALOG_MAX_SIZE
           + " or decrease dfs.namenode.fs-limits.min-block-size in hdfs-site.xml.");
+    }
 
-    final long toleratedWalCreationFailures = aconf
-        .getCount(Property.TSERV_WALOG_TOLERATED_CREATION_FAILURES);
-    final long walFailureRetryIncrement = aconf
-        .getTimeInMillis(Property.TSERV_WALOG_TOLERATED_WAIT_INCREMENT);
-    final long walFailureRetryMax = aconf
-        .getTimeInMillis(Property.TSERV_WALOG_TOLERATED_MAXIMUM_WAIT_DURATION);
-    final RetryFactory walCreationRetryFactory = Retry.builder()
-        .maxRetries(toleratedWalCreationFailures)
-        .retryAfter(walFailureRetryIncrement, TimeUnit.MILLISECONDS)
-        .incrementBy(walFailureRetryIncrement, TimeUnit.MILLISECONDS)
-        .maxWait(walFailureRetryMax, TimeUnit.MILLISECONDS).logInterval(3, TimeUnit.MINUTES)
-        .createFactory();
+    final long toleratedWalCreationFailures =
+        aconf.getCount(Property.TSERV_WALOG_TOLERATED_CREATION_FAILURES);
+    final long walFailureRetryIncrement =
+        aconf.getTimeInMillis(Property.TSERV_WALOG_TOLERATED_WAIT_INCREMENT);
+    final long walFailureRetryMax =
+        aconf.getTimeInMillis(Property.TSERV_WALOG_TOLERATED_MAXIMUM_WAIT_DURATION);
+    final RetryFactory walCreationRetryFactory =
+        Retry.builder().maxRetries(toleratedWalCreationFailures)
+            .retryAfter(walFailureRetryIncrement, TimeUnit.MILLISECONDS)
+            .incrementBy(walFailureRetryIncrement, TimeUnit.MILLISECONDS)
+            .maxWait(walFailureRetryMax, TimeUnit.MILLISECONDS).backOffFactor(1.5)
+            .logInterval(3, TimeUnit.MINUTES).createFactory();
     // Tolerate infinite failures for the write, however backing off the same as for creation
     // failures.
     final RetryFactory walWritingRetryFactory = Retry.builder().infiniteRetries()
         .retryAfter(walFailureRetryIncrement, TimeUnit.MILLISECONDS)
         .incrementBy(walFailureRetryIncrement, TimeUnit.MILLISECONDS)
-        .maxWait(walFailureRetryMax, TimeUnit.MILLISECONDS).logInterval(3, TimeUnit.MINUTES)
-        .createFactory();
+        .maxWait(walFailureRetryMax, TimeUnit.MILLISECONDS).backOffFactor(1.5)
+        .logInterval(3, TimeUnit.MINUTES).createFactory();
 
     logger = new TabletServerLogger(this, walogMaxSize, syncCounter, flushCounter,
         walCreationRetryFactory, walWritingRetryFactory, walogMaxAge);
@@ -427,25 +430,17 @@ public class TabletServer implements Runnable {
     if (aconf.getBoolean(Property.INSTANCE_RPC_SASL_ENABLED)) {
       log.info("SASL is enabled, creating ZooKeeper watcher for AuthenticationKeys");
       // Watcher to notice new AuthenticationKeys which enable delegation tokens
-      authKeyWatcher = new ZooAuthenticationKeyWatcher(context.getSecretManager(),
-          context.getZooReaderWriter(),
-          context.getZooKeeperRoot() + Constants.ZDELEGATION_TOKEN_KEYS);
+      authKeyWatcher =
+          new ZooAuthenticationKeyWatcher(context.getSecretManager(), context.getZooReaderWriter(),
+              context.getZooKeeperRoot() + Constants.ZDELEGATION_TOKEN_KEYS);
     } else {
       authKeyWatcher = null;
     }
     config();
   }
 
-  public ServerContext getContext() {
-    return context;
-  }
-
   public String getInstanceID() {
-    return context.getInstanceID();
-  }
-
-  public AccumuloConfiguration getConfiguration() {
-    return context.getConfiguration();
+    return getContext().getInstanceID();
   }
 
   public String getVersion() {
@@ -473,7 +468,7 @@ public class TabletServer implements Runnable {
       implements TabletClientService.Iface {
 
     ThriftClientHandler() {
-      super(context, watcher, fs);
+      super(getContext(), watcher, fs);
       log.debug("{} created", ThriftClientHandler.class.getName());
     }
 
@@ -482,9 +477,10 @@ public class TabletServer implements Runnable {
         final Map<TKeyExtent,Map<String,MapFileInfo>> files, final boolean setTime)
         throws ThriftSecurityException {
 
-      if (!security.canPerformSystemActions(credentials))
+      if (!security.canPerformSystemActions(credentials)) {
         throw new ThriftSecurityException(credentials.getPrincipal(),
             SecurityErrorCode.PERMISSION_DENIED);
+      }
 
       try {
         return watcher.run(Constants.BULK_ARBITRATOR_TYPE, tid, () -> {
@@ -501,7 +497,7 @@ public class TabletServer implements Runnable {
               fileRefMap.put(new FileRef(path.toString(), path), mapping.getValue());
             }
 
-            Tablet importTablet = onlineTablets.get(new KeyExtent(tke));
+            Tablet importTablet = getOnlineTablet(new KeyExtent(tke));
 
             if (importTablet == null) {
               failures.add(tke);
@@ -528,9 +524,10 @@ public class TabletServer implements Runnable {
     public void loadFiles(TInfo tinfo, TCredentials credentials, long tid, String dir,
         Map<TKeyExtent,Map<String,MapFileInfo>> tabletImports, boolean setTime)
         throws ThriftSecurityException {
-      if (!security.canPerformSystemActions(credentials))
+      if (!security.canPerformSystemActions(credentials)) {
         throw new ThriftSecurityException(credentials.getPrincipal(),
             SecurityErrorCode.PERMISSION_DENIED);
+      }
 
       watcher.runQuietly(Constants.BULK_ARBITRATOR_TYPE, tid, () -> {
         tabletImports.forEach((tke, fileMap) -> {
@@ -542,7 +539,7 @@ public class TabletServer implements Runnable {
             fileRefMap.put(new FileRef(path.toString(), path), mapping.getValue());
           }
 
-          Tablet importTablet = onlineTablets.get(new KeyExtent(tke));
+          Tablet importTablet = getOnlineTablet(new KeyExtent(tke));
 
           if (importTablet != null) {
             try {
@@ -563,7 +560,7 @@ public class TabletServer implements Runnable {
         return null;
       }
 
-      return context.getServerConfFactory().getTableConfiguration(extent.getTableId())
+      return getContext().getServerConfFactory().getTableConfiguration(extent.getTableId())
           .getScanDispatcher();
     }
 
@@ -580,18 +577,20 @@ public class TabletServer implements Runnable {
       TableId tableId = TableId.of(new String(textent.getTable(), UTF_8));
       NamespaceId namespaceId;
       try {
-        namespaceId = Tables.getNamespaceId(context, tableId);
+        namespaceId = Tables.getNamespaceId(getContext(), tableId);
       } catch (TableNotFoundException e1) {
         throw new NotServingTabletException(textent);
       }
       if (!security.canScan(credentials, tableId, namespaceId, range, columns, ssiList, ssio,
-          authorizations))
+          authorizations)) {
         throw new ThriftSecurityException(credentials.getPrincipal(),
             SecurityErrorCode.PERMISSION_DENIED);
+      }
 
-      if (!security.authenticatedUserHasAuthorizations(credentials, authorizations))
+      if (!security.authenticatedUserHasAuthorizations(credentials, authorizations)) {
         throw new ThriftSecurityException(credentials.getPrincipal(),
             SecurityErrorCode.BAD_AUTHORIZATIONS);
+      }
 
       final KeyExtent extent = new KeyExtent(textent);
 
@@ -605,12 +604,14 @@ public class TabletServer implements Runnable {
       // the restarted client may not see the write unless we wait here.
       // this behavior is very important when the client is reading the
       // metadata
-      if (waitForWrites)
+      if (waitForWrites) {
         writeTracker.waitForWrites(TabletType.type(extent));
+      }
 
-      Tablet tablet = onlineTablets.get(extent);
-      if (tablet == null)
+      Tablet tablet = getOnlineTablet(extent);
+      if (tablet == null) {
         throw new NotServingTabletException(textent);
+      }
 
       HashSet<Column> columnSet = new HashSet<>();
       for (TColumn tcolumn : columns) {
@@ -663,8 +664,8 @@ public class TabletServer implements Runnable {
         TSampleNotPresentException {
 
       if (scanSession.nextBatchTask == null) {
-        scanSession.nextBatchTask = new NextBatchTask(TabletServer.this, scanID,
-            scanSession.interruptFlag);
+        scanSession.nextBatchTask =
+            new NextBatchTask(TabletServer.this, scanID, scanSession.interruptFlag);
         resourceManager.executeReadAhead(scanSession.extent, getScanDispatcher(scanSession.extent),
             scanSession, scanSession.nextBatchTask);
       }
@@ -676,14 +677,14 @@ public class TabletServer implements Runnable {
         scanSession.nextBatchTask = null;
       } catch (ExecutionException e) {
         sessionManager.removeSession(scanID);
-        if (e.getCause() instanceof NotServingTabletException)
+        if (e.getCause() instanceof NotServingTabletException) {
           throw (NotServingTabletException) e.getCause();
-        else if (e.getCause() instanceof TooManyFilesException)
+        } else if (e.getCause() instanceof TooManyFilesException) {
           throw new org.apache.accumulo.core.tabletserver.thrift.TooManyFilesException(
               scanSession.extent.toThrift());
-        else if (e.getCause() instanceof SampleNotPresentException)
+        } else if (e.getCause() instanceof SampleNotPresentException) {
           throw new TSampleNotPresentException(scanSession.extent.toThrift());
-        else if (e.getCause() instanceof IOException) {
+        } else if (e.getCause() instanceof IOException) {
           sleepUninterruptibly(MAX_TIME_TO_WAIT_FOR_SCAN_RESULT_MILLIS, TimeUnit.MILLISECONDS);
           List<KVEntry> empty = Collections.emptyList();
           bresult = new ScanBatch(empty, true);
@@ -693,15 +694,16 @@ public class TabletServer implements Runnable {
         }
       } catch (CancellationException ce) {
         sessionManager.removeSession(scanID);
-        Tablet tablet = onlineTablets.get(scanSession.extent);
-        if (tablet == null || tablet.isClosed())
+        Tablet tablet = getOnlineTablet(scanSession.extent);
+        if (tablet == null || tablet.isClosed()) {
           throw new NotServingTabletException(scanSession.extent.toThrift());
-        else
+        } else {
           throw new NoSuchScanIDException();
+        }
       } catch (TimeoutException e) {
         List<TKeyValue> param = Collections.emptyList();
-        long timeout = TabletServer.this.getConfiguration()
-            .getTimeInMillis(Property.TSERV_CLIENT_TIMEOUT);
+        long timeout =
+            TabletServer.this.getConfiguration().getTimeInMillis(Property.TSERV_CLIENT_TIMEOUT);
         sessionManager.removeIfNotAccessed(scanID, timeout);
         return new ScanResult(param, true);
       } catch (Throwable t) {
@@ -719,14 +721,15 @@ public class TabletServer implements Runnable {
       if (scanResult.more && scanSession.batchCount > scanSession.readaheadThreshold) {
         // start reading next batch while current batch is transmitted
         // to client
-        scanSession.nextBatchTask = new NextBatchTask(TabletServer.this, scanID,
-            scanSession.interruptFlag);
+        scanSession.nextBatchTask =
+            new NextBatchTask(TabletServer.this, scanID, scanSession.interruptFlag);
         resourceManager.executeReadAhead(scanSession.extent, getScanDispatcher(scanSession.extent),
             scanSession, scanSession.nextBatchTask);
       }
 
-      if (!scanResult.more)
+      if (!scanResult.more) {
         closeScan(tinfo, scanID);
+      }
 
       return scanResult;
     }
@@ -763,22 +766,25 @@ public class TabletServer implements Runnable {
         tables.add(TableId.of(new String(keyExtent.getTable(), UTF_8)));
       }
 
-      if (tables.size() != 1)
+      if (tables.size() != 1) {
         throw new IllegalArgumentException("Cannot batch scan over multiple tables");
+      }
 
       // check if user has permission to the tables
       for (TableId tableId : tables) {
         NamespaceId namespaceId = getNamespaceId(credentials, tableId);
         if (!security.canScan(credentials, tableId, namespaceId, tbatch, tcolumns, ssiList, ssio,
-            authorizations))
+            authorizations)) {
           throw new ThriftSecurityException(credentials.getPrincipal(),
               SecurityErrorCode.PERMISSION_DENIED);
+        }
       }
 
       try {
-        if (!security.authenticatedUserHasAuthorizations(credentials, authorizations))
+        if (!security.authenticatedUserHasAuthorizations(credentials, authorizations)) {
           throw new ThriftSecurityException(credentials.getPrincipal(),
               SecurityErrorCode.BAD_AUTHORIZATIONS);
+        }
       } catch (ThriftSecurityException tse) {
         log.error("{} is not authorized", credentials.getPrincipal(), tse);
         throw tse;
@@ -789,8 +795,9 @@ public class TabletServer implements Runnable {
       // This is used to determine which thread pool to use
       KeyExtent threadPoolExtent = batch.keySet().iterator().next();
 
-      if (waitForWrites)
+      if (waitForWrites) {
         writeTracker.waitForWrites(TabletType.type(batch.keySet()));
+      }
 
       final MultiScanSession mss = new MultiScanSession(credentials, threadPoolExtent, batch,
           ssiList, ssio, new Authorizations(authorizations),
@@ -802,8 +809,9 @@ public class TabletServer implements Runnable {
         mss.numRanges += ranges.size();
       }
 
-      for (TColumn tcolumn : tcolumns)
+      for (TColumn tcolumn : tcolumns) {
         mss.columnSet.add(new Column(tcolumn));
+      }
 
       long sid = sessionManager.createSession(mss, true);
 
@@ -844,8 +852,8 @@ public class TabletServer implements Runnable {
       }
 
       try {
-        MultiScanResult scanResult = session.lookupTask.get(MAX_TIME_TO_WAIT_FOR_SCAN_RESULT_MILLIS,
-            TimeUnit.MILLISECONDS);
+        MultiScanResult scanResult =
+            session.lookupTask.get(MAX_TIME_TO_WAIT_FOR_SCAN_RESULT_MILLIS, TimeUnit.MILLISECONDS);
         session.lookupTask = null;
         return scanResult;
       } catch (ExecutionException e) {
@@ -857,8 +865,8 @@ public class TabletServer implements Runnable {
           throw new RuntimeException(e);
         }
       } catch (TimeoutException e1) {
-        long timeout = TabletServer.this.getConfiguration()
-            .getTimeInMillis(Property.TSERV_CLIENT_TIMEOUT);
+        long timeout =
+            TabletServer.this.getConfiguration().getTimeInMillis(Property.TSERV_CLIENT_TIMEOUT);
         sessionManager.removeIfNotAccessed(scanID, timeout);
         List<TKeyValue> results = Collections.emptyList();
         Map<TKeyExtent,List<TRange>> failures = Collections.emptyMap();
@@ -895,18 +903,20 @@ public class TabletServer implements Runnable {
       // Make sure user is real
       Durability durability = DurabilityImpl.fromThrift(tdurabilty);
       security.authenticateUser(credentials, credentials);
-      if (updateMetrics.isEnabled())
+      if (updateMetrics.isEnabled()) {
         updateMetrics.add(TabletServerUpdateMetrics.PERMISSION_ERRORS, 0);
+      }
 
-      UpdateSession us = new UpdateSession(new TservConstraintEnv(context, security, credentials),
-          credentials, durability);
+      UpdateSession us = new UpdateSession(
+          new TservConstraintEnv(getContext(), security, credentials), credentials, durability);
       return sessionManager.createSession(us, false);
     }
 
     private void setUpdateTablet(UpdateSession us, KeyExtent keyExtent) {
       long t1 = System.currentTimeMillis();
-      if (us.currentTablet != null && us.currentTablet.getExtent().equals(keyExtent))
+      if (us.currentTablet != null && us.currentTablet.getExtent().equals(keyExtent)) {
         return;
+      }
       if (us.currentTablet == null
           && (us.failures.containsKey(keyExtent) || us.authFailures.containsKey(keyExtent))) {
         // if there were previous failures, then do not accept additional writes
@@ -921,18 +931,19 @@ public class TabletServer implements Runnable {
             && (us.currentTablet.getExtent().getTableId().equals(keyExtent.getTableId()));
         tableId = keyExtent.getTableId();
         if (sameTable || security.canWrite(us.getCredentials(), tableId,
-            Tables.getNamespaceId(context, tableId))) {
+            Tables.getNamespaceId(getContext(), tableId))) {
           long t2 = System.currentTimeMillis();
           us.authTimes.addStat(t2 - t1);
-          us.currentTablet = onlineTablets.get(keyExtent);
+          us.currentTablet = getOnlineTablet(keyExtent);
           if (us.currentTablet != null) {
             us.queuedMutations.put(us.currentTablet, new ArrayList<>());
           } else {
             // not serving tablet, so report all mutations as
             // failures
             us.failures.put(keyExtent, 0L);
-            if (updateMetrics.isEnabled())
+            if (updateMetrics.isEnabled()) {
               updateMetrics.add(TabletServerUpdateMetrics.UNKNOWN_TABLET_ERRORS, 0);
+            }
           }
         } else {
           log.warn("Denying access to table {} for user {}", keyExtent.getTableId(), us.getUser());
@@ -940,8 +951,9 @@ public class TabletServer implements Runnable {
           us.authTimes.addStat(t2 - t1);
           us.currentTablet = null;
           us.authFailures.put(keyExtent, SecurityErrorCode.PERMISSION_DENIED);
-          if (updateMetrics.isEnabled())
+          if (updateMetrics.isEnabled()) {
             updateMetrics.add(TabletServerUpdateMetrics.PERMISSION_ERRORS, 0);
+          }
           return;
         }
       } catch (TableNotFoundException tnfe) {
@@ -950,8 +962,9 @@ public class TabletServer implements Runnable {
         us.authTimes.addStat(t2 - t1);
         us.currentTablet = null;
         us.authFailures.put(keyExtent, SecurityErrorCode.TABLE_DOESNT_EXIST);
-        if (updateMetrics.isEnabled())
+        if (updateMetrics.isEnabled()) {
           updateMetrics.add(TabletServerUpdateMetrics.UNKNOWN_TABLET_ERRORS, 0);
+        }
         return;
       } catch (ThriftSecurityException e) {
         log.error("Denying permission to check user " + us.getUser() + " with user " + e.getUser(),
@@ -960,8 +973,9 @@ public class TabletServer implements Runnable {
         us.authTimes.addStat(t2 - t1);
         us.currentTablet = null;
         us.authFailures.put(keyExtent, e.getCode());
-        if (updateMetrics.isEnabled())
+        if (updateMetrics.isEnabled()) {
           updateMetrics.add(TabletServerUpdateMetrics.PERMISSION_ERRORS, 0);
+        }
         return;
       }
     }
@@ -1021,24 +1035,28 @@ public class TabletServer implements Runnable {
       long pt1 = System.currentTimeMillis();
 
       boolean containsMetadataTablet = false;
-      for (Tablet tablet : us.queuedMutations.keySet())
-        if (tablet.getExtent().isMeta())
+      for (Tablet tablet : us.queuedMutations.keySet()) {
+        if (tablet.getExtent().isMeta()) {
           containsMetadataTablet = true;
+        }
+      }
 
-      if (!containsMetadataTablet && us.queuedMutations.size() > 0)
+      if (!containsMetadataTablet && us.queuedMutations.size() > 0) {
         TabletServer.this.resourceManager.waitUntilCommitsAreEnabled();
+      }
 
       try (TraceScope prep = Trace.startSpan("prep")) {
         for (Entry<Tablet,? extends List<Mutation>> entry : us.queuedMutations.entrySet()) {
 
           Tablet tablet = entry.getKey();
-          Durability durability = DurabilityImpl.resolveDurabilty(us.durability,
-              tablet.getDurability());
+          Durability durability =
+              DurabilityImpl.resolveDurabilty(us.durability, tablet.getDurability());
           List<Mutation> mutations = entry.getValue();
           if (mutations.size() > 0) {
             try {
-              if (updateMetrics.isEnabled())
+              if (updateMetrics.isEnabled()) {
                 updateMetrics.add(TabletServerUpdateMetrics.MUTATION_ARRAY_SIZE, mutations.size());
+              }
 
               CommitSession commitSession = tablet.prepareMutationsForCommit(us.cenv, mutations);
               if (commitSession == null) {
@@ -1057,8 +1075,9 @@ public class TabletServer implements Runnable {
 
             } catch (TConstraintViolationException e) {
               us.violations.add(e.getViolations());
-              if (updateMetrics.isEnabled())
+              if (updateMetrics.isEnabled()) {
                 updateMetrics.add(TabletServerUpdateMetrics.CONSTRAINT_VIOLATIONS, 0);
+              }
 
               if (e.getNonViolators().size() > 0) {
                 // only log and commit mutations if there were some
@@ -1146,18 +1165,21 @@ public class TabletServer implements Runnable {
     }
 
     private void updateWalogWriteTime(long time) {
-      if (updateMetrics.isEnabled())
+      if (updateMetrics.isEnabled()) {
         updateMetrics.add(TabletServerUpdateMetrics.WALOG_WRITE_TIME, time);
+      }
     }
 
     private void updateAvgCommitTime(long time, int size) {
-      if (updateMetrics.isEnabled())
+      if (updateMetrics.isEnabled()) {
         updateMetrics.add(TabletServerUpdateMetrics.COMMIT_TIME, (long) ((time) / (double) size));
+      }
     }
 
     private void updateAvgPrepTime(long time, int size) {
-      if (updateMetrics.isEnabled())
+      if (updateMetrics.isEnabled()) {
         updateMetrics.add(TabletServerUpdateMetrics.COMMIT_PREP, (long) ((time) / (double) size));
+      }
     }
 
     @Override
@@ -1220,11 +1242,12 @@ public class TabletServer implements Runnable {
 
       final TableId tableId = TableId.of(new String(tkeyExtent.getTable(), UTF_8));
       NamespaceId namespaceId = getNamespaceId(credentials, tableId);
-      if (!security.canWrite(credentials, tableId, namespaceId))
+      if (!security.canWrite(credentials, tableId, namespaceId)) {
         throw new ThriftSecurityException(credentials.getPrincipal(),
             SecurityErrorCode.PERMISSION_DENIED);
+      }
       final KeyExtent keyExtent = new KeyExtent(tkeyExtent);
-      final Tablet tablet = onlineTablets.get(new KeyExtent(keyExtent));
+      final Tablet tablet = getOnlineTablet(new KeyExtent(keyExtent));
       if (tablet == null) {
         throw new NotServingTabletException(tkeyExtent);
       }
@@ -1250,7 +1273,7 @@ public class TabletServer implements Runnable {
         CommitSession cs;
         try (TraceScope prep = Trace.startSpan("prep")) {
           cs = tablet.prepareMutationsForCommit(
-              new TservConstraintEnv(context, security, credentials), mutations);
+              new TservConstraintEnv(getContext(), security, credentials), mutations);
         }
         if (cs == null) {
           throw new NotServingTabletException(tkeyExtent);
@@ -1284,7 +1307,7 @@ public class TabletServer implements Runnable {
     private NamespaceId getNamespaceId(TCredentials credentials, TableId tableId)
         throws ThriftSecurityException {
       try {
-        return Tables.getNamespaceId(context, tableId);
+        return Tables.getNamespaceId(getContext(), tableId);
       } catch (TableNotFoundException e1) {
         throw new ThriftSecurityException(credentials.getPrincipal(),
             SecurityErrorCode.TABLE_DOESNT_EXIST);
@@ -1294,28 +1317,29 @@ public class TabletServer implements Runnable {
     private void checkConditions(Map<KeyExtent,List<ServerConditionalMutation>> updates,
         ArrayList<TCMResult> results, ConditionalSession cs, List<String> symbols)
         throws IOException {
-      Iterator<Entry<KeyExtent,List<ServerConditionalMutation>>> iter = updates.entrySet()
-          .iterator();
+      Iterator<Entry<KeyExtent,List<ServerConditionalMutation>>> iter =
+          updates.entrySet().iterator();
 
       final CompressedIterators compressedIters = new CompressedIterators(symbols);
-      ConditionCheckerContext checkerContext = new ConditionCheckerContext(context, compressedIters,
-          confFactory.getTableConfiguration(cs.tableId));
+      ConditionCheckerContext checkerContext = new ConditionCheckerContext(getContext(),
+          compressedIters, confFactory.getTableConfiguration(cs.tableId));
 
       while (iter.hasNext()) {
         final Entry<KeyExtent,List<ServerConditionalMutation>> entry = iter.next();
-        final Tablet tablet = onlineTablets.get(entry.getKey());
+        final Tablet tablet = getOnlineTablet(entry.getKey());
 
         if (tablet == null || tablet.isClosed()) {
-          for (ServerConditionalMutation scm : entry.getValue())
+          for (ServerConditionalMutation scm : entry.getValue()) {
             results.add(new TCMResult(scm.getID(), TCMStatus.IGNORED));
+          }
           iter.remove();
         } else {
-          final List<ServerConditionalMutation> okMutations = new ArrayList<>(
-              entry.getValue().size());
+          final List<ServerConditionalMutation> okMutations =
+              new ArrayList<>(entry.getValue().size());
           final List<TCMResult> resultsSubList = results.subList(results.size(), results.size());
 
-          ConditionChecker checker = checkerContext.newChecker(entry.getValue(), okMutations,
-              resultsSubList);
+          ConditionChecker checker =
+              checkerContext.newChecker(entry.getValue(), okMutations, resultsSubList);
           try {
             tablet.checkConditions(checker, cs.auths, cs.interruptFlag);
 
@@ -1350,29 +1374,32 @@ public class TabletServer implements Runnable {
       try (TraceScope prepSpan = Trace.startSpan("prep")) {
         long t1 = System.currentTimeMillis();
         for (Entry<KeyExtent,List<ServerConditionalMutation>> entry : es) {
-          final Tablet tablet = onlineTablets.get(entry.getKey());
+          final Tablet tablet = getOnlineTablet(entry.getKey());
           if (tablet == null || tablet.isClosed() || sessionCanceled) {
-            for (ServerConditionalMutation scm : entry.getValue())
+            for (ServerConditionalMutation scm : entry.getValue()) {
               results.add(new TCMResult(scm.getID(), TCMStatus.IGNORED));
+            }
           } else {
-            final Durability durability = DurabilityImpl.resolveDurabilty(sess.durability,
-                tablet.getDurability());
+            final Durability durability =
+                DurabilityImpl.resolveDurabilty(sess.durability, tablet.getDurability());
             try {
 
               @SuppressWarnings("unchecked")
-              List<Mutation> mutations = (List<Mutation>) (List<? extends Mutation>) entry
-                  .getValue();
+              List<Mutation> mutations =
+                  (List<Mutation>) (List<? extends Mutation>) entry.getValue();
               if (mutations.size() > 0) {
 
                 CommitSession cs = tablet.prepareMutationsForCommit(
-                    new TservConstraintEnv(context, security, sess.credentials), mutations);
+                    new TservConstraintEnv(getContext(), security, sess.credentials), mutations);
 
                 if (cs == null) {
-                  for (ServerConditionalMutation scm : entry.getValue())
+                  for (ServerConditionalMutation scm : entry.getValue()) {
                     results.add(new TCMResult(scm.getID(), TCMStatus.IGNORED));
+                  }
                 } else {
-                  for (ServerConditionalMutation scm : entry.getValue())
+                  for (ServerConditionalMutation scm : entry.getValue()) {
                     results.add(new TCMResult(scm.getID(), TCMStatus.ACCEPTED));
+                  }
                   if (durability != Durability.NONE) {
                     loggables.put(cs, new TabletMutations(cs, mutations, durability));
                   }
@@ -1386,14 +1413,16 @@ public class TabletServer implements Runnable {
                   loggables.put(cs, new TabletMutations(cs, e.getNonViolators(), durability));
                 }
                 sendables.put(cs, e.getNonViolators());
-                for (Mutation m : e.getNonViolators())
+                for (Mutation m : e.getNonViolators()) {
                   results.add(
                       new TCMResult(((ServerConditionalMutation) m).getID(), TCMStatus.ACCEPTED));
+                }
               }
 
-              for (Mutation m : e.getViolators())
+              for (Mutation m : e.getViolators()) {
                 results.add(
                     new TCMResult(((ServerConditionalMutation) m).getID(), TCMStatus.VIOLATED));
+              }
             }
           }
         }
@@ -1466,15 +1495,18 @@ public class TabletServer implements Runnable {
       TableId tableId = TableId.of(tableIdStr);
       Authorizations userauths = null;
       NamespaceId namespaceId = getNamespaceId(credentials, tableId);
-      if (!security.canConditionallyUpdate(credentials, tableId, namespaceId))
+      if (!security.canConditionallyUpdate(credentials, tableId, namespaceId)) {
         throw new ThriftSecurityException(credentials.getPrincipal(),
             SecurityErrorCode.PERMISSION_DENIED);
+      }
 
       userauths = security.getUserAuthorizations(credentials);
-      for (ByteBuffer auth : authorizations)
-        if (!userauths.contains(ByteBufferUtil.toBytes(auth)))
+      for (ByteBuffer auth : authorizations) {
+        if (!userauths.contains(ByteBufferUtil.toBytes(auth))) {
           throw new ThriftSecurityException(credentials.getPrincipal(),
               SecurityErrorCode.BAD_AUTHORIZATIONS);
+        }
+      }
 
       ConditionalSession cs = new ConditionalSession(credentials,
           new Authorizations(authorizations), tableId, DurabilityImpl.fromThrift(tdurabilty));
@@ -1490,8 +1522,9 @@ public class TabletServer implements Runnable {
 
       ConditionalSession cs = (ConditionalSession) sessionManager.reserveSession(sessID);
 
-      if (cs == null || cs.interruptFlag.get())
+      if (cs == null || cs.interruptFlag.get()) {
         throw new NoSuchScanIDException();
+      }
 
       if (!cs.tableId.equals(MetadataTable.ID) && !cs.tableId.equals(RootTable.ID)) {
         try {
@@ -1511,15 +1544,17 @@ public class TabletServer implements Runnable {
         Map<KeyExtent,List<ServerConditionalMutation>> updates = Translator.translate(mutations,
             Translators.TKET, new Translator.ListTranslator<>(ServerConditionalMutation.TCMT));
 
-        for (KeyExtent ke : updates.keySet())
-          if (!ke.getTableId().equals(tid))
+        for (KeyExtent ke : updates.keySet()) {
+          if (!ke.getTableId().equals(tid)) {
             throw new IllegalArgumentException(
                 "Unexpected table id " + tid + " != " + ke.getTableId());
+          }
+        }
 
         ArrayList<TCMResult> results = new ArrayList<>();
 
-        Map<KeyExtent,List<ServerConditionalMutation>> deferred = conditionalUpdate(cs, updates,
-            results, symbols);
+        Map<KeyExtent,List<ServerConditionalMutation>> deferred =
+            conditionalUpdate(cs, updates, results, symbols);
 
         while (deferred.size() > 0) {
           deferred = conditionalUpdate(cs, deferred, results, symbols);
@@ -1540,12 +1575,14 @@ public class TabletServer implements Runnable {
       // after this method returns a conditional update should not be able to start
 
       ConditionalSession cs = (ConditionalSession) sessionManager.getSession(sessID);
-      if (cs != null)
+      if (cs != null) {
         cs.interruptFlag.set(true);
+      }
 
       cs = (ConditionalSession) sessionManager.reserveSession(sessID, true);
-      if (cs != null)
+      if (cs != null) {
         sessionManager.removeSession(sessID, true);
+      }
     }
 
     @Override
@@ -1560,13 +1597,14 @@ public class TabletServer implements Runnable {
       TableId tableId = TableId.of(new String(ByteBufferUtil.toBytes(tkeyExtent.table)));
       NamespaceId namespaceId = getNamespaceId(credentials, tableId);
 
-      if (!security.canSplitTablet(credentials, tableId, namespaceId))
+      if (!security.canSplitTablet(credentials, tableId, namespaceId)) {
         throw new ThriftSecurityException(credentials.getPrincipal(),
             SecurityErrorCode.PERMISSION_DENIED);
+      }
 
       KeyExtent keyExtent = new KeyExtent(tkeyExtent);
 
-      Tablet tablet = onlineTablets.get(keyExtent);
+      Tablet tablet = getOnlineTablet(keyExtent);
       if (tablet == null) {
         throw new NotServingTabletException(tkeyExtent);
       }
@@ -1591,14 +1629,10 @@ public class TabletServer implements Runnable {
 
     @Override
     public List<TabletStats> getTabletStats(TInfo tinfo, TCredentials credentials, String tableId) {
-      TreeMap<KeyExtent,Tablet> onlineTabletsCopy;
-      synchronized (onlineTablets) {
-        onlineTabletsCopy = new TreeMap<>(onlineTablets);
-      }
       List<TabletStats> result = new ArrayList<>();
       TableId text = TableId.of(tableId);
       KeyExtent start = new KeyExtent(text, new Text(), null);
-      for (Entry<KeyExtent,Tablet> entry : onlineTabletsCopy.tailMap(start).entrySet()) {
+      for (Entry<KeyExtent,Tablet> entry : getOnlineTablets().tailMap(start).entrySet()) {
         KeyExtent ke = entry.getKey();
         if (ke.getTableId().compareTo(text) == 0) {
           Tablet tablet = entry.getValue();
@@ -1625,7 +1659,7 @@ public class TabletServer implements Runnable {
         }
       } catch (ThriftSecurityException e) {
         log.warn("Got {} message from unauthenticatable user: {}", request, e.getUser());
-        if (context.getCredentials().getToken().getClass().getName()
+        if (getContext().getCredentials().getToken().getClass().getName()
             .equals(credentials.getTokenClassName())) {
           log.error("Got message from a service with a mismatched configuration."
               + " Please ensure a compatible configuration.", e);
@@ -1648,8 +1682,8 @@ public class TabletServer implements Runnable {
       }
 
       if (lock != null) {
-        ZooUtil.LockID lid = new ZooUtil.LockID(context.getZooKeeperRoot() + Constants.ZMASTER_LOCK,
-            lock);
+        ZooUtil.LockID lid =
+            new ZooUtil.LockID(getContext().getZooKeeperRoot() + Constants.ZMASTER_LOCK, lock);
 
         try {
           if (!ZooLock.isLockHeld(masterLockCache, lid)) {
@@ -1691,7 +1725,8 @@ public class TabletServer implements Runnable {
 
             Set<KeyExtent> unopenedOverlapping = KeyExtent.findOverlapping(extent, unopenedTablets);
             Set<KeyExtent> openingOverlapping = KeyExtent.findOverlapping(extent, openingTablets);
-            Set<KeyExtent> onlineOverlapping = KeyExtent.findOverlapping(extent, onlineTablets);
+            Set<KeyExtent> onlineOverlapping =
+                KeyExtent.findOverlapping(extent, onlineTablets.snapshot());
 
             Set<KeyExtent> all = new HashSet<>();
             all.addAll(unopenedOverlapping);
@@ -1702,9 +1737,9 @@ public class TabletServer implements Runnable {
 
               // ignore any tablets that have recently split, for error logging
               for (KeyExtent e2 : onlineOverlapping) {
-                Tablet tablet = onlineTablets.get(e2);
-                if (System.currentTimeMillis()
-                    - tablet.getSplitCreationTime() < RECENTLY_SPLIT_MILLIES) {
+                Tablet tablet = getOnlineTablet(e2);
+                if (System.currentTimeMillis() - tablet.getSplitCreationTime()
+                    < RECENTLY_SPLIT_MILLIES) {
                   all.remove(e2);
                 }
               }
@@ -1736,7 +1771,7 @@ public class TabletServer implements Runnable {
           @Override
           public void run() {
             ah.run();
-            if (onlineTablets.containsKey(extent)) {
+            if (onlineTablets.snapshot().containsKey(extent)) {
               log.info("Root tablet loaded: {}", extent);
             } else {
               log.info("Root tablet failed to load");
@@ -1784,10 +1819,10 @@ public class TabletServer implements Runnable {
       KeyExtent ke = new KeyExtent(TableId.of(tableId), ByteBufferUtil.toText(endRow),
           ByteBufferUtil.toText(startRow));
 
-      synchronized (onlineTablets) {
-        for (Tablet tablet : onlineTablets.values())
-          if (ke.overlaps(tablet.getExtent()))
-            tabletsToFlush.add(tablet);
+      for (Tablet tablet : getOnlineTablets().values()) {
+        if (ke.overlaps(tablet.getExtent())) {
+          tabletsToFlush.add(tablet);
+        }
       }
 
       Long flushID = null;
@@ -1818,7 +1853,7 @@ public class TabletServer implements Runnable {
         throw new RuntimeException(e);
       }
 
-      Tablet tablet = onlineTablets.get(new KeyExtent(textent));
+      Tablet tablet = getOnlineTablet(new KeyExtent(textent));
       if (tablet != null) {
         log.info("Flushing {}", tablet.getExtent());
         try {
@@ -1886,7 +1921,7 @@ public class TabletServer implements Runnable {
 
       KeyExtent ke = new KeyExtent(textent);
 
-      Tablet tablet = onlineTablets.get(ke);
+      Tablet tablet = getOnlineTablet(ke);
       if (tablet != null) {
         tablet.chopFiles();
       }
@@ -1906,10 +1941,11 @@ public class TabletServer implements Runnable {
           ByteBufferUtil.toText(startRow));
 
       ArrayList<Tablet> tabletsToCompact = new ArrayList<>();
-      synchronized (onlineTablets) {
-        for (Tablet tablet : onlineTablets.values())
-          if (ke.overlaps(tablet.getExtent()))
-            tabletsToCompact.add(tablet);
+
+      for (Tablet tablet : getOnlineTablets().values()) {
+        if (ke.overlaps(tablet.getExtent())) {
+          tabletsToCompact.add(tablet);
+        }
       }
 
       Pair<Long,UserCompactionConfig> compactionInfo = null;
@@ -1917,13 +1953,14 @@ public class TabletServer implements Runnable {
       for (Tablet tablet : tabletsToCompact) {
         // all for the same table id, so only need to read
         // compaction id once
-        if (compactionInfo == null)
+        if (compactionInfo == null) {
           try {
             compactionInfo = tablet.getCompactionID();
           } catch (NoNodeException e) {
             log.info("Asked to compact table with no compaction id {} {}", ke, e.getMessage());
             return;
           }
+        }
         tablet.compactAll(compactionInfo.getFirst(), compactionInfo.getSecond());
       }
 
@@ -1969,8 +2006,8 @@ public class TabletServer implements Runnable {
 
     private TSummaries getSummaries(Future<SummaryCollection> future) throws TimeoutException {
       try {
-        SummaryCollection sc = future.get(MAX_TIME_TO_WAIT_FOR_SCAN_RESULT_MILLIS,
-            TimeUnit.MILLISECONDS);
+        SummaryCollection sc =
+            future.get(MAX_TIME_TO_WAIT_FOR_SCAN_RESULT_MILLIS, TimeUnit.MILLISECONDS);
         return sc.toThrift();
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
@@ -1981,8 +2018,8 @@ public class TabletServer implements Runnable {
     }
 
     private TSummaries handleTimeout(long sessionId) {
-      long timeout = TabletServer.this.getConfiguration()
-          .getTimeInMillis(Property.TSERV_CLIENT_TIMEOUT);
+      long timeout =
+          TabletServer.this.getConfiguration().getTimeInMillis(Property.TSERV_CLIENT_TIMEOUT);
       sessionManager.removeIfNotAccessed(sessionId, timeout);
       return new TSummaries(false, sessionId, -1, -1, null);
     }
@@ -2008,7 +2045,7 @@ public class TabletServer implements Runnable {
       NamespaceId namespaceId;
       TableId tableId = TableId.of(request.getTableId());
       try {
-        namespaceId = Tables.getNamespaceId(context, tableId);
+        namespaceId = Tables.getNamespaceId(getContext(), tableId);
       } catch (TableNotFoundException e1) {
         throw new ThriftTableOperationException(tableId.canonical(), null, null,
             TableOperationExceptionType.NOTFOUND, null);
@@ -2019,10 +2056,10 @@ public class TabletServer implements Runnable {
             SecurityErrorCode.PERMISSION_DENIED).asThriftException();
       }
 
-      ServerConfigurationFactory factory = context.getServerConfFactory();
+      ServerConfigurationFactory factory = getContext().getServerConfFactory();
       ExecutorService es = resourceManager.getSummaryPartitionExecutor();
-      Future<SummaryCollection> future = new Gatherer(context, request,
-          factory.getTableConfiguration(tableId), context.getCryptoService()).gather(es);
+      Future<SummaryCollection> future = new Gatherer(getContext(), request,
+          factory.getTableConfiguration(tableId), getContext().getCryptoService()).gather(es);
 
       return startSummaryOperation(credentials, future);
     }
@@ -2037,11 +2074,11 @@ public class TabletServer implements Runnable {
             SecurityErrorCode.PERMISSION_DENIED).asThriftException();
       }
 
-      ServerConfigurationFactory factory = context.getServerConfFactory();
+      ServerConfigurationFactory factory = getContext().getServerConfFactory();
       ExecutorService spe = resourceManager.getSummaryRemoteExecutor();
-      Future<SummaryCollection> future = new Gatherer(context, request,
+      Future<SummaryCollection> future = new Gatherer(getContext(), request,
           factory.getTableConfiguration(TableId.of(request.getTableId())),
-          context.getCryptoService()).processPartition(spe, modulus, remainder);
+          getContext().getCryptoService()).processPartition(spe, modulus, remainder);
 
       return startSummaryOperation(credentials, future);
     }
@@ -2057,15 +2094,15 @@ public class TabletServer implements Runnable {
       }
 
       ExecutorService srp = resourceManager.getSummaryRetrievalExecutor();
-      TableConfiguration tableCfg = confFactory
-          .getTableConfiguration(TableId.of(request.getTableId()));
+      TableConfiguration tableCfg =
+          confFactory.getTableConfiguration(TableId.of(request.getTableId()));
       BlockCache summaryCache = resourceManager.getSummaryCache();
       BlockCache indexCache = resourceManager.getIndexCache();
       Cache<String,Long> fileLenCache = resourceManager.getFileLenCache();
       FileSystemResolver volMgr = p -> fs.getVolumeByPath(p).getFileSystem();
-      Future<SummaryCollection> future = new Gatherer(context, request, tableCfg,
-          context.getCryptoService()).processFiles(volMgr, files, summaryCache, indexCache,
-              fileLenCache, srp);
+      Future<SummaryCollection> future =
+          new Gatherer(getContext(), request, tableCfg, getContext().getCryptoService())
+              .processFiles(volMgr, files, summaryCache, indexCache, fileLenCache, srp);
 
       return startSummaryOperation(credentials, future);
     }
@@ -2106,10 +2143,6 @@ public class TabletServer implements Runnable {
     return totalQueuedMutationSize.addAndGet(additionalMutationSize);
   }
 
-  public Tablet getOnlineTablet(KeyExtent extent) {
-    return onlineTablets.get(extent);
-  }
-
   public Session getSession(long sessionId) {
     return sessionManager.getSession(sessionId);
   }
@@ -2132,21 +2165,13 @@ public class TabletServer implements Runnable {
           sleepUninterruptibly(getConfiguration().getTimeInMillis(Property.TSERV_MAJC_DELAY),
               TimeUnit.MILLISECONDS);
 
-          TreeMap<KeyExtent,Tablet> copyOnlineTablets = new TreeMap<>();
-
-          synchronized (onlineTablets) {
-            copyOnlineTablets.putAll(onlineTablets); // avoid
-            // concurrent
-            // modification
-          }
-
           List<DfsLogger> closedCopy;
 
           synchronized (closedLogs) {
             closedCopy = copyClosedLogs(closedLogs);
           }
 
-          Iterator<Entry<KeyExtent,Tablet>> iter = copyOnlineTablets.entrySet().iterator();
+          Iterator<Entry<KeyExtent,Tablet>> iter = getOnlineTablets().entrySet().iterator();
 
           // bail early now if we're shutting down
           while (iter.hasNext()) {
@@ -2225,11 +2250,8 @@ public class TabletServer implements Runnable {
     statsKeeper.saveMajorMinorTimes(tablet.getTabletStats());
 
     // lose the reference to the old tablet and open two new ones
-    synchronized (onlineTablets) {
-      onlineTablets.remove(tablet.getExtent());
-      onlineTablets.put(newTablets[0].getExtent(), newTablets[0]);
-      onlineTablets.put(newTablets[1].getExtent(), newTablets[1]);
-    }
+    onlineTablets.split(tablet.getExtent(), newTablets[0], newTablets[1]);
+
     // tell the master
     enqueueMasterMessage(new SplitReportMessage(tablet.getExtent(), newTablets[0].getExtent(),
         new Text("/" + newTablets[0].getLocation().getName()), newTablets[1].getExtent(),
@@ -2279,8 +2301,8 @@ public class TabletServer implements Runnable {
         }
       }
       synchronized (onlineTablets) {
-        if (onlineTablets.containsKey(extent)) {
-          t = onlineTablets.get(extent);
+        if (onlineTablets.snapshot().containsKey(extent)) {
+          t = onlineTablets.snapshot().get(extent);
         }
       }
 
@@ -2326,10 +2348,10 @@ public class TabletServer implements Runnable {
             || (extent.isMeta()
                 && !getConfiguration().getBoolean(Property.MASTER_METADATA_SUSPENDABLE))) {
           log.debug("Unassigning {}", tls);
-          TabletStateStore.unassign(context, tls, null);
+          TabletStateStore.unassign(getContext(), tls, null);
         } else {
           log.debug("Suspending " + tls);
-          TabletStateStore.suspend(context, tls, null,
+          TabletStateStore.suspend(getContext(), tls, null,
               requestTimeSkew + MILLISECONDS.convert(System.nanoTime(), NANOSECONDS));
         }
       } catch (DistributedStoreException ex) {
@@ -2375,10 +2397,12 @@ public class TabletServer implements Runnable {
             // check
             Set<KeyExtent> unopenedOverlapping = KeyExtent.findOverlapping(extent, unopenedTablets);
             Set<KeyExtent> openingOverlapping = KeyExtent.findOverlapping(extent, openingTablets);
-            Set<KeyExtent> onlineOverlapping = KeyExtent.findOverlapping(extent, onlineTablets);
+            Set<KeyExtent> onlineOverlapping =
+                KeyExtent.findOverlapping(extent, onlineTablets.snapshot());
 
-            if (openingOverlapping.contains(extent) || onlineOverlapping.contains(extent))
+            if (openingOverlapping.contains(extent) || onlineOverlapping.contains(extent)) {
               return;
+            }
 
             if (!unopenedOverlapping.contains(extent)) {
               log.info("assignment {} no longer in the unopened set", extent);
@@ -2404,9 +2428,9 @@ public class TabletServer implements Runnable {
       Text locationToOpen = null;
       SortedMap<Key,Value> tabletsKeyValues = new TreeMap<>();
       try {
-        Pair<Text,KeyExtent> pair = verifyTabletInformation(context, extent,
-            TabletServer.this.getTabletSession(), tabletsKeyValues, getClientAddressString(),
-            getLock());
+        Pair<Text,KeyExtent> pair =
+            verifyTabletInformation(getContext(), extent, TabletServer.this.getTabletSession(),
+                tabletsKeyValues, getClientAddressString(), getLock());
         if (pair != null) {
           locationToOpen = pair.getFirst();
           if (pair.getSecond() != null) {
@@ -2454,11 +2478,11 @@ public class TabletServer implements Runnable {
       try {
         acquireRecoveryMemory(extent);
 
-        TabletResourceManager trm = resourceManager.createTabletResourceManager(extent,
-            getTableConfiguration(extent));
+        TabletResourceManager trm =
+            resourceManager.createTabletResourceManager(extent, getTableConfiguration(extent));
         TabletData data;
         if (extent.isRootTablet()) {
-          data = new TabletData(context, fs, getTableConfiguration(extent));
+          data = new TabletData(getContext(), fs, getTableConfiguration(extent));
         } else {
           data = new TabletData(extent, fs, tabletsKeyValues.entrySet().iterator());
         }
@@ -2482,7 +2506,7 @@ public class TabletServer implements Runnable {
           throw new RuntimeException("Minor compaction after recovery fails for " + extent);
         }
         Assignment assignment = new Assignment(extent, getTabletSession());
-        TabletStateStore.setLocation(context, assignment);
+        TabletStateStore.setLocation(getContext(), assignment);
 
         synchronized (openingTablets) {
           synchronized (onlineTablets) {
@@ -2502,7 +2526,7 @@ public class TabletServer implements Runnable {
         }
 
         TableId tableId = extent.getTableId();
-        ProblemReports.getInstance(context).report(new ProblemReport(tableId, TABLET_LOAD,
+        ProblemReports.getInstance(getContext()).report(new ProblemReport(tableId, TABLET_LOAD,
             extent.getUUID().toString(), getClientAddressString(), e));
       } finally {
         releaseRecoveryMemory(extent);
@@ -2559,9 +2583,8 @@ public class TabletServer implements Runnable {
   private HostAndPort startServer(AccumuloConfiguration conf, String address, Property portHint,
       TProcessor processor, String threadName) throws UnknownHostException {
     Property maxMessageSizeProperty = (conf.get(Property.TSERV_MAX_MESSAGE_SIZE) != null
-        ? Property.TSERV_MAX_MESSAGE_SIZE
-        : Property.GENERAL_MAX_MESSAGE_SIZE);
-    ServerAddress sp = TServerUtils.startServer(context, address, portHint, processor,
+        ? Property.TSERV_MAX_MESSAGE_SIZE : Property.GENERAL_MAX_MESSAGE_SIZE);
+    ServerAddress sp = TServerUtils.startServer(getContext(), address, portHint, processor,
         this.getClass().getSimpleName(), threadName, Property.TSERV_PORTSEARCH,
         Property.TSERV_MINTHREADS, Property.TSERV_THREADCHECK, maxMessageSizeProperty);
     this.server = sp.server;
@@ -2570,9 +2593,10 @@ public class TabletServer implements Runnable {
 
   private HostAndPort getMasterAddress() {
     try {
-      List<String> locations = context.getMasterLocations();
-      if (locations.size() == 0)
+      List<String> locations = getContext().getMasterLocations();
+      if (locations.size() == 0) {
         return null;
+      }
       return HostAndPort.fromString(locations.get(0));
     } catch (Exception e) {
       log.warn("Failed to obtain master host " + e);
@@ -2588,7 +2612,7 @@ public class TabletServer implements Runnable {
         return null;
       }
       // log.info("Listener API to master has been opened");
-      return ThriftUtil.getClient(new MasterClientService.Client.Factory(), address, context);
+      return ThriftUtil.getClient(new MasterClientService.Client.Factory(), address, getContext());
     } catch (Exception e) {
       log.warn("Issue with masterConnection (" + address + ") " + e, e);
     }
@@ -2604,15 +2628,15 @@ public class TabletServer implements Runnable {
     clientHandler = new ThriftClientHandler();
     Iface rpcProxy = TraceUtil.wrapService(clientHandler);
     final Processor<Iface> processor;
-    if (context.getThriftServerType() == ThriftServerType.SASL) {
+    if (getContext().getThriftServerType() == ThriftServerType.SASL) {
       Iface tcredProxy = TCredentialsUpdatingWrapper.service(rpcProxy, ThriftClientHandler.class,
           getConfiguration());
       processor = new Processor<>(tcredProxy);
     } else {
       processor = new Processor<>(rpcProxy);
     }
-    HostAndPort address = startServer(context.getServerConfFactory().getSystemConfiguration(),
-        clientAddress.getHost(), Property.TSERV_CLIENTPORT, processor, "Thrift Client Server");
+    HostAndPort address = startServer(getConfiguration(), clientAddress.getHost(),
+        Property.TSERV_CLIENTPORT, processor, "Thrift Client Server");
     log.info("address = {}", address);
     return address;
   }
@@ -2620,17 +2644,14 @@ public class TabletServer implements Runnable {
   private void startReplicationService() throws UnknownHostException {
     final ReplicationServicerHandler handler = new ReplicationServicerHandler(this);
     ReplicationServicer.Iface rpcProxy = TraceUtil.wrapService(handler);
-    ReplicationServicer.Iface repl = TCredentialsUpdatingWrapper.service(rpcProxy,
-        handler.getClass(), getConfiguration());
-    // @formatter:off
+    ReplicationServicer.Iface repl =
+        TCredentialsUpdatingWrapper.service(rpcProxy, handler.getClass(), getConfiguration());
     ReplicationServicer.Processor<ReplicationServicer.Iface> processor =
-      new ReplicationServicer.Processor<>(repl);
-    // @formatter:on
-    AccumuloConfiguration conf = context.getServerConfFactory().getSystemConfiguration();
-    Property maxMessageSizeProperty = (conf.get(Property.TSERV_MAX_MESSAGE_SIZE) != null
-        ? Property.TSERV_MAX_MESSAGE_SIZE
-        : Property.GENERAL_MAX_MESSAGE_SIZE);
-    ServerAddress sp = TServerUtils.startServer(context, clientAddress.getHost(),
+        new ReplicationServicer.Processor<>(repl);
+    Property maxMessageSizeProperty =
+        getConfiguration().get(Property.TSERV_MAX_MESSAGE_SIZE) != null
+            ? Property.TSERV_MAX_MESSAGE_SIZE : Property.GENERAL_MAX_MESSAGE_SIZE;
+    ServerAddress sp = TServerUtils.startServer(getContext(), clientAddress.getHost(),
         Property.REPLICATION_RECEIPT_SERVICE_PORT, processor, "ReplicationServicerHandler",
         "Replication Servicer", Property.TSERV_PORTSEARCH, Property.REPLICATION_MIN_THREADS,
         Property.REPLICATION_THREADCHECK, maxMessageSizeProperty);
@@ -2641,8 +2662,8 @@ public class TabletServer implements Runnable {
       // The replication service is unique to the thrift service for a tserver, not just a host.
       // Advertise the host and port for replication service given the host and port for the
       // tserver.
-      context.getZooReaderWriter().putPersistentData(
-          context.getZooKeeperRoot() + ReplicationConstants.ZOO_TSERVERS + "/" + clientAddress,
+      getContext().getZooReaderWriter().putPersistentData(
+          getContext().getZooKeeperRoot() + ReplicationConstants.ZOO_TSERVERS + "/" + clientAddress,
           sp.address.toString().getBytes(UTF_8), NodeExistsPolicy.OVERWRITE);
     } catch (Exception e) {
       log.error("Could not advertise replication service port", e);
@@ -2655,10 +2676,10 @@ public class TabletServer implements Runnable {
   }
 
   private void announceExistence() {
-    ZooReaderWriter zoo = context.getZooReaderWriter();
+    ZooReaderWriter zoo = getContext().getZooReaderWriter();
     try {
-      String zPath = context.getZooKeeperRoot() + Constants.ZTSERVERS + "/"
-          + getClientAddressString();
+      String zPath =
+          getContext().getZooKeeperRoot() + Constants.ZTSERVERS + "/" + getClientAddressString();
 
       try {
         zoo.putPersistentData(zPath, new byte[] {}, NodeExistsPolicy.SKIP);
@@ -2677,8 +2698,9 @@ public class TabletServer implements Runnable {
         @Override
         public void lostLock(final LockLossReason reason) {
           Halt.halt(serverStopRequested ? 0 : 1, () -> {
-            if (!serverStopRequested)
+            if (!serverStopRequested) {
               log.error("Lost tablet server lock (reason = {}), exiting.", reason);
+            }
             gcLogger.logGCInfo(getConfiguration());
           });
         }
@@ -2698,7 +2720,7 @@ public class TabletServer implements Runnable {
         if (tabletServerLock.tryLock(lw, lockContent)) {
           log.debug("Obtained tablet server lock {}", tabletServerLock.getLockPath());
           lockID = tabletServerLock.getLockID()
-              .serialize(context.getZooKeeperRoot() + Constants.ZTSERVERS + "/");
+              .serialize(getContext().getZooKeeperRoot() + Constants.ZTSERVERS + "/");
           return;
         }
         log.info("Waiting for tablet server lock");
@@ -2716,13 +2738,13 @@ public class TabletServer implements Runnable {
   // main loop listens for client requests
   @Override
   public void run() {
-    SecurityUtil.serverLogin(context.getConfiguration());
+    SecurityUtil.serverLogin(getConfiguration());
 
     // To make things easier on users/devs, and to avoid creating an upgrade path to 1.7
     // We can just make the zookeeper paths before we try to use.
     try {
-      ZooKeeperInitialization.ensureZooKeeperInitialized(context.getZooReaderWriter(),
-          context.getZooKeeperRoot());
+      ZooKeeperInitialization.ensureZooKeeperInitialized(getContext().getZooReaderWriter(),
+          getContext().getZooKeeperRoot());
     } catch (KeeperException | InterruptedException e) {
       log.error("Could not ensure that ZooKeeper is properly initialized", e);
       throw new RuntimeException(e);
@@ -2771,9 +2793,10 @@ public class TabletServer implements Runnable {
         getConfiguration().getCount(Property.TSERV_WORKQ_THREADS), "distributed work queue");
 
     bulkFailedCopyQ = new DistributedWorkQueue(
-        context.getZooKeeperRoot() + Constants.ZBULK_FAILED_COPYQ, getConfiguration());
+        getContext().getZooKeeperRoot() + Constants.ZBULK_FAILED_COPYQ, getConfiguration());
     try {
-      bulkFailedCopyQ.startProcessing(new BulkFailedCopyProcessor(context), distWorkQThreadPool);
+      bulkFailedCopyQ.startProcessing(new BulkFailedCopyProcessor(getContext()),
+          distWorkQThreadPool);
     } catch (Exception e1) {
       throw new RuntimeException("Failed to start distributed work queue for copying ", e1);
     }
@@ -2826,7 +2849,7 @@ public class TabletServer implements Runnable {
               && client.getOutputProtocol().getTransport() != null
               && client.getOutputProtocol().getTransport().isOpen()) {
             try {
-              mm.send(context.rpcCreds(), getClientAddressString(), iface);
+              mm.send(getContext().rpcCreds(), getClientAddressString(), iface);
               mm = null;
             } catch (TException ex) {
               log.warn("Error sending message: queuing message again");
@@ -2958,21 +2981,23 @@ public class TabletServer implements Runnable {
       return verifyRootTablet(context, instance);
     }
     TableId tableToVerify = MetadataTable.ID;
-    if (extent.isMeta())
+    if (extent.isMeta()) {
       tableToVerify = RootTable.ID;
+    }
 
-    List<ColumnFQ> columnsToFetch = Arrays.asList(
-        TabletsSection.ServerColumnFamily.DIRECTORY_COLUMN,
-        TabletsSection.TabletColumnFamily.PREV_ROW_COLUMN,
-        TabletsSection.TabletColumnFamily.SPLIT_RATIO_COLUMN,
-        TabletsSection.TabletColumnFamily.OLD_PREV_ROW_COLUMN,
-        TabletsSection.ServerColumnFamily.TIME_COLUMN);
+    List<ColumnFQ> columnsToFetch =
+        Arrays.asList(TabletsSection.ServerColumnFamily.DIRECTORY_COLUMN,
+            TabletsSection.TabletColumnFamily.PREV_ROW_COLUMN,
+            TabletsSection.TabletColumnFamily.SPLIT_RATIO_COLUMN,
+            TabletsSection.TabletColumnFamily.OLD_PREV_ROW_COLUMN,
+            TabletsSection.ServerColumnFamily.TIME_COLUMN);
 
     TreeMap<Key,Value> tkv = new TreeMap<>();
     try (ScannerImpl scanner = new ScannerImpl(context, tableToVerify, Authorizations.EMPTY)) {
       scanner.setRange(extent.toMetadataRange());
-      for (Entry<Key,Value> entry : scanner)
+      for (Entry<Key,Value> entry : scanner) {
         tkv.put(entry.getKey(), entry.getValue());
+      }
     }
 
     // only populate map after success
@@ -2982,8 +3007,9 @@ public class TabletServer implements Runnable {
     Text metadataEntry = extent.getMetadataEntry();
 
     Value dir = checkTabletMetadata(extent, instance, tabletsKeyValues, metadataEntry);
-    if (dir == null)
+    if (dir == null) {
       return null;
+    }
 
     Value oldPrevEndRow = null;
     for (Entry<Key,Value> entry : tabletsKeyValues.entrySet()) {
@@ -3075,15 +3101,17 @@ public class TabletServer implements Runnable {
   }
 
   public String getClientAddressString() {
-    if (clientAddress == null)
+    if (clientAddress == null) {
       return null;
+    }
     return clientAddress.getHost() + ":" + clientAddress.getPort();
   }
 
   public TServerInstance getTabletSession() {
     String address = getClientAddressString();
-    if (address == null)
+    if (address == null) {
       return null;
+    }
 
     try {
       return new TServerInstance(address, tabletServerLock.getSessionId());
@@ -3094,13 +3122,13 @@ public class TabletServer implements Runnable {
   }
 
   private void config() {
-    log.info("Tablet server starting on {}", context.getHostname());
-    majorCompactorThread = new Daemon(
-        new LoggingRunnable(log, new MajorCompactor(getConfiguration())));
+    log.info("Tablet server starting on {}", getHostname());
+    majorCompactorThread =
+        new Daemon(new LoggingRunnable(log, new MajorCompactor(getConfiguration())));
     majorCompactorThread.setName("Split/MajC initiator");
     majorCompactorThread.start();
 
-    clientAddress = HostAndPort.fromParts(context.getHostname(), 0);
+    clientAddress = HostAndPort.fromParts(getHostname(), 0);
     try {
       AccumuloVFSClassLoader.getContextManager()
           .setContextConfig(new ContextManager.DefaultContextsConfig() {
@@ -3116,7 +3144,7 @@ public class TabletServer implements Runnable {
 
     // A task that cleans up unused classloader contexts
     Runnable contextCleaner = () -> {
-      Set<String> contextProperties = context.getServerConfFactory().getSystemConfiguration()
+      Set<String> contextProperties = getConfiguration()
           .getAllPropertiesWithPrefix(Property.VFS_CONTEXT_CLASSPATH_PROPERTY).keySet();
       Set<String> configuredContexts = new HashSet<>();
       for (String prop : contextProperties) {
@@ -3141,13 +3169,7 @@ public class TabletServer implements Runnable {
     SimpleTimer.getInstance(aconf).schedule(gcDebugTask, 0, TIME_BETWEEN_GC_CHECKS);
 
     Runnable constraintTask = () -> {
-      ArrayList<Tablet> tablets;
-
-      synchronized (onlineTablets) {
-        tablets = new ArrayList<>(onlineTablets.values());
-      }
-
-      for (Tablet tablet : tablets) {
+      for (Tablet tablet : getOnlineTablets().values()) {
         tablet.checkConstraints();
       }
     };
@@ -3159,13 +3181,9 @@ public class TabletServer implements Runnable {
     long start = System.currentTimeMillis();
     TabletServerStatus result = new TabletServerStatus();
 
-    Map<KeyExtent,Tablet> onlineTabletsCopy;
-    synchronized (this.onlineTablets) {
-      onlineTabletsCopy = new HashMap<>(this.onlineTablets);
-    }
     final Map<String,TableInfo> tables = new HashMap<>();
 
-    onlineTabletsCopy.forEach((ke, tablet) -> {
+    getOnlineTablets().forEach((ke, tablet) -> {
       String tableId = ke.getTableId().canonical();
       TableInfo table = tables.get(tableId);
       if (table == null) {
@@ -3185,14 +3203,18 @@ public class TabletServer implements Runnable {
       table.scanRate += tablet.scanRate();
       long recsInMemory = tablet.getNumEntriesInMemory();
       table.recsInMemory += recsInMemory;
-      if (tablet.isMinorCompactionRunning())
+      if (tablet.isMinorCompactionRunning()) {
         table.minors.running++;
-      if (tablet.isMinorCompactionQueued())
+      }
+      if (tablet.isMinorCompactionQueued()) {
         table.minors.queued++;
-      if (tablet.isMajorCompactionRunning())
+      }
+      if (tablet.isMajorCompactionRunning()) {
         table.majors.running++;
-      if (tablet.isMajorCompactionQueued())
+      }
+      if (tablet.isMajorCompactionQueued()) {
         table.majors.queued++;
+      }
     });
 
     scanCounts.forEach((tableId, mapCounter) -> {
@@ -3202,8 +3224,9 @@ public class TabletServer implements Runnable {
         tables.put(tableId.canonical(), table);
       }
 
-      if (table.scans == null)
+      if (table.scans == null) {
         table.scans = new Compacting();
+      }
 
       table.scans.queued += mapCounter.getInt(ScanRunState.QUEUED);
       table.scans.running += mapCounter.getInt(ScanRunState.RUNNING);
@@ -3248,29 +3271,6 @@ public class TabletServer implements Runnable {
     return result;
   }
 
-  public static void main(String[] args) throws Exception {
-    final String app = "tserver";
-    ServerOpts opts = new ServerOpts();
-    opts.parseArgs(app, args);
-    ServerContext context = new ServerContext(opts.getSiteConfiguration());
-    context.setupServer(app, TabletServer.class.getSimpleName(), opts.getAddress());
-    context.setupCrypto();
-    try {
-      final TabletServer server = new TabletServer(context);
-      if (UserGroupInformation.isSecurityEnabled()) {
-        UserGroupInformation loginUser = UserGroupInformation.getLoginUser();
-        loginUser.doAs((PrivilegedExceptionAction<Void>) () -> {
-          server.run();
-          return null;
-        });
-      } else {
-        server.run();
-      }
-    } finally {
-      context.teardownServer();
-    }
-  }
-
   private Durability getMincEventDurability(KeyExtent extent) {
     TableConfiguration conf;
     if (extent.isMeta()) {
@@ -3307,9 +3307,10 @@ public class TabletServer implements Runnable {
       if (fs.exists(finished)) {
         recovery = finished.getParent();
       }
-      if (recovery == null)
+      if (recovery == null) {
         throw new IOException(
             "Unable to find recovery files for extent " + extent + " logEntry: " + entry);
+      }
       recoveryLogs.add(recovery);
     }
     logger.recover(fs, extent, recoveryLogs, tabletFiles, mutationReceiver);
@@ -3342,10 +3343,12 @@ public class TabletServer implements Runnable {
     };
   }
 
-  public Collection<Tablet> getOnlineTablets() {
-    synchronized (onlineTablets) {
-      return new ArrayList<>(onlineTablets.values());
-    }
+  public SortedMap<KeyExtent,Tablet> getOnlineTablets() {
+    return onlineTablets.snapshot();
+  }
+
+  public Tablet getOnlineTablet(KeyExtent extent) {
+    return onlineTablets.snapshot().get(extent);
   }
 
   public VolumeManager getFileSystem() {
@@ -3373,7 +3376,8 @@ public class TabletServer implements Runnable {
   }
 
   // avoid unnecessary redundant markings to meta
-  final ConcurrentHashMap<DfsLogger,EnumSet<TabletLevel>> metadataTableLogs = new ConcurrentHashMap<>();
+  final ConcurrentHashMap<DfsLogger,EnumSet<TabletLevel>> metadataTableLogs =
+      new ConcurrentHashMap<>();
 
   // This is a set of WALs that are closed but may still be referenced by tablets. A LinkedHashSet
   // is used because its very import to know the order in which WALs were closed when deciding if a
@@ -3436,7 +3440,7 @@ public class TabletServer implements Runnable {
     }
 
     ReferencedRemover refRemover = candidates -> {
-      for (Tablet tablet : getOnlineTablets()) {
+      for (Tablet tablet : getOnlineTablets().values()) {
         tablet.removeInUseLogs(candidates);
         if (candidates.isEmpty()) {
           break;
@@ -3493,8 +3497,8 @@ public class TabletServer implements Runnable {
 
   private static final String MAJC_READ_LIMITER_KEY = "tserv_majc_read";
   private static final String MAJC_WRITE_LIMITER_KEY = "tserv_majc_write";
-  private final RateProvider rateProvider = () -> getConfiguration()
-      .getAsBytes(Property.TSERV_MAJC_THROUGHPUT);
+  private final RateProvider rateProvider =
+      () -> getConfiguration().getAsBytes(Property.TSERV_MAJC_THROUGHPUT);
 
   /**
    * Get the {@link RateLimiter} for reads during major compactions on this tserver. All writes
